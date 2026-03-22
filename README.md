@@ -2,10 +2,22 @@
 
 # LetMeSleep
 
-T'as un PC pro où t'as pas le droit de toucher au délai de verrouillage automatique ? Ouais, bienvenue dans la vraie vie.
+etMeSleep
 
-LetMeSleep bouge ta souris toutes les X secondes pour que ton écran reste allumé. Tu lances, tu dors (ou tu fais semblant de bosser), ça tourne en fond.
+Sur certains postes pro, le verrouillage automatique est imposé et non modifiable.
+LetMeSleep contourne ce comportement en simulant une activité utilisateur à intervalle régulier, empêchant ainsi la mise en veille ou le verrouillage de la session.
 
-**Stack :** Python + tray icon
+Fonctionnement
 
-**Usage :** Lance l'exe, configure l'intervalle, active. C'est tout.
+L’application envoie un léger mouvement de souris toutes les X secondes pour maintenir la session active.
+Elle tourne en arrière-plan, sans interaction intrusive.
+
+Stack
+Python
+Interface via icône système (tray)
+Utilisation
+Lancer l’exécutable
+Définir l’intervalle souhaité
+Activer le maintien d’activité
+
+Aucune configuration supplémentaire requise.
