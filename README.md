@@ -2,8 +2,6 @@
 
 # LetMeSleep
 
-etMeSleep
-
 Sur certains postes pro, le verrouillage automatique est imposé et non modifiable.
 LetMeSleep contourne ce comportement en simulant une activité utilisateur à intervalle régulier, empêchant ainsi la mise en veille ou le verrouillage de la session.
 
