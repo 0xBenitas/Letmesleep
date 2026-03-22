@@ -1,5 +1,3 @@
-<img width="308" height="397" alt="image" src="https://github.com/user-attachments/assets/7d023c29-3987-4bac-94e8-9516b3d774eb" />
-
 # LetMeSleep
 
 Sur certains postes pro, le verrouillage automatique est imposé et non modifiable.
@@ -19,3 +17,5 @@ Définir l’intervalle souhaité
 Activer le maintien d’activité
 
 Aucune configuration supplémentaire requise.
+
+<img width="308" height="397" alt="image" src="https://github.com/user-attachments/assets/7d023c29-3987-4bac-94e8-9516b3d774eb" />
