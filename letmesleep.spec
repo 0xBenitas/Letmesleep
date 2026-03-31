@@ -10,7 +10,7 @@ a = Analysis(
         ('images_transparent.png', '.'),
         ('images_transparent.ico', '.'),
     ],
-    hiddenimports=[],
+    hiddenimports=['transcription', 'mistralai', 'sounddevice', 'numpy', 'pynput'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

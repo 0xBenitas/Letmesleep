@@ -1,16 +1,22 @@
 """
 LetMeSleep — Outil anti-veille mignon et léger.
-Zéro dépendance externe (tkinter + ctypes uniquement).
 Conçu pour tourner en arrière-plan sur un PC pro.
 """
 
 import ctypes
+import json
 import os
 import sys
 import threading
 import time
 import tkinter as tk
 from datetime import datetime, timedelta
+
+try:
+    from transcription import VoiceTranscriber
+    HAS_TRANSCRIPTION = True
+except ImportError:
+    HAS_TRANSCRIPTION = False
 
 # ── Windows API (déplacement souris sans lib externe) ───
 INPUT_MOUSE = 0
@@ -67,6 +73,29 @@ def resource_path(relative_path):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 
+def config_dir():
+    """Dossier de config persistant (pas le temp PyInstaller)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_FILE = os.path.join(config_dir(), "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(data):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
 # ── App ─────────────────────────────────────────────────
 DIRECTIONS = [(1, 0), (0, 1), (-1, 0), (0, -1)]
 
@@ -81,11 +110,14 @@ class LetMeSleep:
         self.started_at = None
         self.moves = 0
         self.stop_time = None  # datetime cible d'arrêt
+        self.config = load_config()
+        self.transcriber = None
 
         self._build_ui()
         self._start_worker()
         self._tick_footer()
         self._tick_timer()
+        self._init_transcription()
         self.root.mainloop()
 
     # ── UI ──────────────────────────────────────────────
@@ -105,7 +137,7 @@ class LetMeSleep:
                 pass
 
         # Taille & position coin bas-droit
-        w, h = 310, 370
+        w, h = 310, 470
         sx = self.root.winfo_screenwidth() - w - 20
         sy = self.root.winfo_screenheight() - h - 60
         self.root.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -239,6 +271,43 @@ class LetMeSleep:
         )
         self.timer_lbl.pack(pady=(0, 6))
 
+        # ─ Card Transcription Vocale
+        trans_card = tk.Frame(self.root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        trans_card.pack(fill="x", padx=16, pady=(0, 6))
+
+        tk.Label(
+            trans_card, text="Transcription Vocale", font=("Segoe UI", 9, "bold"),
+            bg=CARD, fg=TXT
+        ).pack(anchor="w", padx=12, pady=(8, 2))
+
+        # Ligne clé API
+        row_api = tk.Frame(trans_card, bg=CARD)
+        row_api.pack(fill="x", padx=12, pady=(4, 2))
+        tk.Label(row_api, text="Clé API", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="left")
+        self.api_key_var = tk.StringVar(value=self.config.get("mistral_api_key", ""))
+        tk.Entry(
+            row_api, textvariable=self.api_key_var, show="\u2022", width=22,
+            font=("Segoe UI", 8), bg="#313244", fg=TXT,
+            relief="flat", insertbackground=TXT
+        ).pack(side="right")
+
+        # Ligne raccourci
+        row_hk = tk.Frame(trans_card, bg=CARD)
+        row_hk.pack(fill="x", padx=12, pady=(2, 2))
+        tk.Label(row_hk, text="Raccourci", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="left")
+        tk.Label(
+            row_hk, text="Ctrl+Alt+R", font=("Segoe UI", 9, "bold"),
+            bg=CARD, fg=PINK
+        ).pack(side="right")
+
+        # Status transcription
+        self.trans_status = tk.Label(
+            trans_card, text="Prêt" if HAS_TRANSCRIPTION else "Dépendances manquantes",
+            font=("Segoe UI", 8), bg=CARD,
+            fg=SUB if HAS_TRANSCRIPTION else RED
+        )
+        self.trans_status.pack(pady=(0, 6))
+
         # ─ Bouton toggle
         self.btn = tk.Button(
             self.root, text="▶  Activer", font=("Segoe UI", 11, "bold"),
@@ -350,10 +419,83 @@ class LetMeSleep:
                 )
         self.root.after(1000, self._tick_timer)
 
+    # ── Transcription ──────────────────────────────────
+    def _init_transcription(self):
+        if not HAS_TRANSCRIPTION:
+            return
+        self._overlay = None
+        self._overlay_hide_id = None
+
+        def on_status(msg, is_recording):
+            self.root.after(0, lambda: self._handle_trans_status(msg, is_recording))
+
+        self.transcriber = VoiceTranscriber(
+            api_key=self.api_key_var.get(),
+            on_status=on_status,
+        )
+        self.transcriber.start()
+
+        # Sync API key changes
+        self.api_key_var.trace_add("write", self._on_api_key_change)
+
+    def _on_api_key_change(self, *_):
+        if self.transcriber:
+            self.transcriber.update_key(self.api_key_var.get())
+
+    def _handle_trans_status(self, msg, is_recording):
+        self.trans_status.configure(
+            text=msg,
+            fg=self.PINK if is_recording else self.SUB,
+        )
+        if is_recording:
+            self._show_overlay(msg)
+        else:
+            self._show_overlay(msg)
+            # Auto-masquer après 2 s
+            if self._overlay_hide_id:
+                self.root.after_cancel(self._overlay_hide_id)
+            self._overlay_hide_id = self.root.after(2000, self._hide_overlay)
+
+    def _show_overlay(self, text):
+        """Petit indicateur flottant en haut de l'écran."""
+        is_rec = "Enregistrement" in text
+        color = self.RED if is_rec else "#313244"
+        if self._overlay is None:
+            self._overlay = tk.Toplevel(self.root)
+            self._overlay.overrideredirect(True)
+            self._overlay.attributes("-topmost", True)
+            try:
+                self._overlay.attributes("-alpha", 0.92)
+            except tk.TclError:
+                pass
+            self._overlay_lbl = tk.Label(
+                self._overlay, font=("Segoe UI", 10, "bold"),
+                padx=18, pady=6,
+            )
+            self._overlay_lbl.pack()
+        self._overlay_lbl.configure(text=text, bg=color, fg="white")
+        self._overlay.configure(bg=color)
+        self._overlay.update_idletasks()
+        ow = self._overlay.winfo_reqwidth()
+        sx = (self.root.winfo_screenwidth() - ow) // 2
+        self._overlay.geometry(f"+{sx}+12")
+        self._overlay.deiconify()
+
+    def _hide_overlay(self):
+        if self._overlay:
+            self._overlay.withdraw()
+
+    def _save_config(self):
+        self.config["mistral_api_key"] = self.api_key_var.get()
+        save_config(self.config)
+
     def _quit(self):
         self.running = False
         self.active = False
         keep_awake(False)
+        self._save_config()
+        if self.transcriber:
+            self.transcriber.stop()
         self.root.destroy()
 
 

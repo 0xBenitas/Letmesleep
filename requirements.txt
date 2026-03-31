@@ -1,1 +1,5 @@
 pyinstaller>=6.0
+mistralai>=1.0
+sounddevice>=0.4
+numpy>=1.24
+pynput>=1.7
