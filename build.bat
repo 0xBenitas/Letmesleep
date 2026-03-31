@@ -1,12 +1,14 @@
 @echo off
-echo === LetMeSleep — Build ===
+echo === LetMeSleep v2.0 — Build ===
 echo.
 
-:: Vérifie que PyInstaller est installé
-pip show pyinstaller >nul 2>&1
+:: Installe toutes les dépendances
+echo Installation des dependances...
+pip install -r requirements.txt
 if errorlevel 1 (
-    echo Installation de PyInstaller...
-    pip install pyinstaller
+    echo ERREUR : pip install a echoue.
+    pause
+    exit /b 1
 )
 
 echo.
@@ -14,5 +16,9 @@ echo Build en cours...
 pyinstaller letmesleep.spec --clean -y
 
 echo.
-echo Done ! L'exe est dans : dist\LetMeSleep.exe
+if exist "dist\LetMeSleep.exe" (
+    echo OK ! L'exe est dans : dist\LetMeSleep.exe
+) else (
+    echo ERREUR : le build a echoue.
+)
 pause

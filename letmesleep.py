@@ -1,18 +1,33 @@
 """
-LetMeSleep — Outil anti-veille mignon et léger.
-Zéro dépendance externe (tkinter + ctypes uniquement).
+LetMeSleep — Anti-veille + Transcription vocale.
 Conçu pour tourner en arrière-plan sur un PC pro.
 """
 
 import ctypes
+import json
 import os
 import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 from datetime import datetime, timedelta
 
-# ── Windows API (déplacement souris sans lib externe) ───
+try:
+    from transcription import VoiceTranscriber
+    HAS_TRANSCRIPTION = True
+except ImportError:
+    HAS_TRANSCRIPTION = False
+
+try:
+    import pystray
+    from PIL import Image as PILImage
+    HAS_TRAY = True
+except ImportError:
+    HAS_TRAY = False
+
+
+# ── Windows API (déplacement souris) ──────────────────
 INPUT_MOUSE = 0
 MOUSEEVENTF_MOVE = 0x0001
 
@@ -45,7 +60,6 @@ def move_mouse(dx, dy):
     ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
 
-# Empêche aussi la mise en veille Windows
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
@@ -60,6 +74,8 @@ def keep_awake(on=True):
         ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
 
+# ── Chemins & Config ──────────────────────────────────
+
 def resource_path(relative_path):
     """Résout le chemin vers une ressource, compatible PyInstaller."""
     if hasattr(sys, "_MEIPASS"):
@@ -67,9 +83,53 @@ def resource_path(relative_path):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 
-# ── App ─────────────────────────────────────────────────
+def config_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONFIG_FILE = os.path.join(config_dir(), "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(data):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+# ── Constantes ────────────────────────────────────────
+
 DIRECTIONS = [(1, 0), (0, 1), (-1, 0), (0, -1)]
 
+LANGUAGES = [
+    ("Auto", ""),
+    ("Français", "fr"),
+    ("English", "en"),
+    ("Español", "es"),
+    ("Deutsch", "de"),
+    ("Italiano", "it"),
+    ("Português", "pt"),
+    ("中文", "zh"),
+    ("日本語", "ja"),
+    ("한국어", "ko"),
+    ("العربية", "ar"),
+    ("हिन्दी", "hi"),
+    ("Русский", "ru"),
+    ("Nederlands", "nl"),
+]
+
+LANG_MAP = {name: code for name, code in LANGUAGES}
+
+
+# ── App ───────────────────────────────────────────────
 
 class LetMeSleep:
     def __init__(self):
@@ -80,23 +140,41 @@ class LetMeSleep:
         self.step = 0
         self.started_at = None
         self.moves = 0
-        self.stop_time = None  # datetime cible d'arrêt
+        self.stop_time = None
+        self.config = load_config()
+        self.transcriber = None
+        self.tray_icon = None
+        self.history = self.config.get("history", [])
 
         self._build_ui()
         self._start_worker()
         self._tick_footer()
         self._tick_timer()
+        self._init_transcription()
+        self._init_tray()
         self.root.mainloop()
 
-    # ── UI ──────────────────────────────────────────────
+    # ── Palette ────────────────────────────────────────
+    BG      = "#1e1e2e"
+    CARD    = "#282840"
+    TXT     = "#cdd6f4"
+    SUB     = "#6c7086"
+    GREEN   = "#a6e3a1"
+    RED     = "#f38ba8"
+    ACCENT  = "#cba6f7"
+    PINK    = "#f5c2e7"
+    BORDER  = "#45475a"
+    SURFACE = "#313244"
+
+    # ── UI ─────────────────────────────────────────────
+
     def _build_ui(self):
         self.root = tk.Tk()
         self.root.title("LetMeSleep")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
-        self.root.protocol("WM_DELETE_WINDOW", self._quit)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Icône
         ico = resource_path("images_transparent.ico")
         if os.path.exists(ico):
             try:
@@ -104,171 +182,274 @@ class LetMeSleep:
             except tk.TclError:
                 pass
 
-        # Taille & position coin bas-droit
-        w, h = 310, 370
+        w, h = 340, 440
         sx = self.root.winfo_screenwidth() - w - 20
         sy = self.root.winfo_screenheight() - h - 60
         self.root.geometry(f"{w}x{h}+{sx}+{sy}")
+        self.root.configure(bg=self.BG)
 
-        # ── Palette Catppuccin Mocha ──
-        BG = "#1e1e2e"
-        CARD = "#282840"
-        TXT = "#cdd6f4"
-        SUB = "#6c7086"
-        GREEN = "#a6e3a1"
-        RED = "#f38ba8"
-        ACCENT = "#cba6f7"  # Mauve — plus mignon
-        PINK = "#f5c2e7"
-        BORDER = "#45475a"
+        self._apply_ttk_style()
+        self._build_header()
 
-        self.BG = BG
-        self.GREEN, self.RED, self.ACCENT, self.SUB = GREEN, RED, ACCENT, SUB
-        self.PINK, self.TXT, self.CARD, self.BORDER = PINK, TXT, CARD, BORDER
-        self.root.configure(bg=BG)
+        # ── Notebook (volets) ──
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
-        # ─ Header avec logo
-        head = tk.Frame(self.root, bg=BG)
-        head.pack(fill="x", padx=16, pady=(14, 2))
+        tab1 = tk.Frame(self.notebook, bg=self.BG)
+        tab2 = tk.Frame(self.notebook, bg=self.BG)
+        tab3 = tk.Frame(self.notebook, bg=self.BG)
+        self.notebook.add(tab1, text="  Anti-Veille  ")
+        self.notebook.add(tab2, text="  Transcription  ")
+        self.notebook.add(tab3, text="  Réglages  ")
 
-        # Logo PNG
+        self._build_tab_antiveille(tab1)
+        self._build_tab_transcription(tab2)
+        self._build_tab_settings(tab3)
+
+    def _apply_ttk_style(self):
+        s = ttk.Style()
+        s.theme_use("clam")
+        s.configure("TNotebook", background=self.BG, borderwidth=0,
+                     tabmargins=[4, 4, 4, 0])
+        s.configure("TNotebook.Tab", background=self.CARD, foreground=self.SUB,
+                     padding=[14, 6], font=("Segoe UI", 9, "bold"), borderwidth=0)
+        s.map("TNotebook.Tab",
+              background=[("selected", self.SURFACE)],
+              foreground=[("selected", self.PINK)])
+        s.configure("TCheckbutton", background=self.CARD, foreground=self.TXT,
+                     font=("Segoe UI", 9), focuscolor=self.CARD)
+        s.map("TCheckbutton", background=[("active", self.CARD)])
+        s.configure("TCombobox", fieldbackground=self.SURFACE, foreground=self.TXT,
+                     background=self.CARD, arrowcolor=self.PINK)
+
+    def _build_header(self):
+        head = tk.Frame(self.root, bg=self.BG)
+        head.pack(fill="x", padx=16, pady=(12, 2))
+
         self.logo_img = None
         png = resource_path("images_transparent.png")
         if os.path.exists(png):
             try:
                 self.logo_img = tk.PhotoImage(file=png)
-                # Réduire à ~32px
-                orig_w = self.logo_img.width()
-                factor = max(1, orig_w // 32)
+                factor = max(1, self.logo_img.width() // 32)
                 self.logo_img = self.logo_img.subsample(factor, factor)
-                tk.Label(head, image=self.logo_img, bg=BG).pack(side="left", padx=(0, 8))
+                tk.Label(head, image=self.logo_img, bg=self.BG).pack(side="left", padx=(0, 8))
             except tk.TclError:
                 pass
 
-        tk.Label(
-            head, text="LetMeSleep", font=("Segoe UI", 14, "bold"),
-            bg=BG, fg=PINK
-        ).pack(side="left")
+        tk.Label(head, text="LetMeSleep", font=("Segoe UI", 14, "bold"),
+                 bg=self.BG, fg=self.PINK).pack(side="left")
 
-        self.status_dot = tk.Label(
-            head, text="●", font=("Segoe UI", 12), bg=BG, fg=RED
-        )
+        self.status_dot = tk.Label(head, text="●", font=("Segoe UI", 12),
+                                    bg=self.BG, fg=self.RED)
         self.status_dot.pack(side="right")
-        self.status_lbl = tk.Label(
-            head, text="Inactif", font=("Segoe UI", 9), bg=BG, fg=SUB
-        )
+        self.status_lbl = tk.Label(head, text="Inactif", font=("Segoe UI", 9),
+                                    bg=self.BG, fg=self.SUB)
         self.status_lbl.pack(side="right", padx=(0, 4))
 
-        # ─ Sous-titre
-        tk.Label(
-            self.root, text="Anti-veille tout doux", font=("Segoe UI", 8),
-            bg=BG, fg=SUB
-        ).pack(anchor="w", padx=16, pady=(0, 8))
+        tk.Label(self.root, text="Anti-veille + Transcription vocale",
+                 font=("Segoe UI", 8), bg=self.BG, fg=self.SUB
+                 ).pack(anchor="w", padx=16, pady=(0, 6))
 
-        # ─ Card Réglages
-        card = tk.Frame(self.root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        card.pack(fill="x", padx=16, pady=(0, 6))
+    # ── Tab: Anti-Veille ───────────────────────────────
 
-        tk.Label(
-            card, text="Réglages", font=("Segoe UI", 9, "bold"),
-            bg=CARD, fg=TXT
-        ).pack(anchor="w", padx=12, pady=(8, 2))
+    def _build_tab_antiveille(self, parent):
+        # Réglages
+        card = self._card(parent, top_pad=8)
 
-        # Ligne intervalle
-        row1 = tk.Frame(card, bg=CARD)
-        row1.pack(fill="x", padx=12, pady=(4, 2))
-        tk.Label(row1, text="Intervalle", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="left")
+        row1 = self._row(card)
+        self._lbl(row1, "Intervalle")
         self.interval_var = tk.StringVar(value="30")
-        tk.Spinbox(
-            row1, from_=5, to=300, increment=5, width=5,
-            textvariable=self.interval_var, font=("Segoe UI", 9),
-            bg="#313244", fg=TXT, buttonbackground=CARD,
-            relief="flat", insertbackground=TXT
-        ).pack(side="right")
-        tk.Label(row1, text="sec", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="right", padx=(0, 4))
+        self._spinbox(row1, self.interval_var, 5, 300, 5)
+        self._lbl(row1, "sec", side="right", pad=(0, 4))
 
-        # Ligne distance
-        row2 = tk.Frame(card, bg=CARD)
-        row2.pack(fill="x", padx=12, pady=(2, 8))
-        tk.Label(row2, text="Distance", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="left")
+        row2 = self._row(card, pad_top=2, pad_bot=10)
+        self._lbl(row2, "Distance")
         self.distance_var = tk.StringVar(value="5")
-        tk.Spinbox(
-            row2, from_=1, to=50, increment=1, width=5,
-            textvariable=self.distance_var, font=("Segoe UI", 9),
-            bg="#313244", fg=TXT, buttonbackground=CARD,
-            relief="flat", insertbackground=TXT
-        ).pack(side="right")
-        tk.Label(row2, text="px", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="right", padx=(0, 4))
+        self._spinbox(row2, self.distance_var, 1, 50, 1)
+        self._lbl(row2, "px", side="right", pad=(0, 4))
 
-        # ─ Card Timer
-        timer_card = tk.Frame(self.root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        timer_card.pack(fill="x", padx=16, pady=(0, 6))
+        # Timer
+        timer = self._card(parent, top_pad=0)
+        tk.Label(timer, text="Arrêt programmé", font=("Segoe UI", 9, "bold"),
+                 bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
 
-        tk.Label(
-            timer_card, text="Arrêt programmé", font=("Segoe UI", 9, "bold"),
-            bg=CARD, fg=TXT
-        ).pack(anchor="w", padx=12, pady=(8, 2))
-
-        row_timer = tk.Frame(timer_card, bg=CARD)
-        row_timer.pack(fill="x", padx=12, pady=(4, 8))
-
-        tk.Label(row_timer, text="Arrêter à", font=("Segoe UI", 9), bg=CARD, fg=SUB).pack(side="left")
-
+        rt = self._row(timer, pad_bot=4)
+        self._lbl(rt, "Arrêter à")
         self.timer_hour = tk.StringVar(value="")
         self.timer_min = tk.StringVar(value="")
+        tf = tk.Frame(rt, bg=self.CARD)
+        tf.pack(side="right")
+        self._spinbox_in(tf, self.timer_hour, 0, 23, 1, 3, fmt="%02.0f")
+        tk.Label(tf, text="h", font=("Segoe UI", 9, "bold"),
+                 bg=self.CARD, fg=self.PINK).pack(side="left", padx=2)
+        self._spinbox_in(tf, self.timer_min, 0, 59, 5, 3, fmt="%02.0f")
 
-        time_frame = tk.Frame(row_timer, bg=CARD)
-        time_frame.pack(side="right")
-
-        tk.Spinbox(
-            time_frame, from_=0, to=23, increment=1, width=3,
-            textvariable=self.timer_hour, font=("Segoe UI", 9),
-            bg="#313244", fg=TXT, buttonbackground=CARD,
-            relief="flat", insertbackground=TXT, format="%02.0f"
-        ).pack(side="left")
-        tk.Label(time_frame, text="h", font=("Segoe UI", 9, "bold"), bg=CARD, fg=PINK).pack(side="left", padx=2)
-        tk.Spinbox(
-            time_frame, from_=0, to=59, increment=5, width=3,
-            textvariable=self.timer_min, font=("Segoe UI", 9),
-            bg="#313244", fg=TXT, buttonbackground=CARD,
-            relief="flat", insertbackground=TXT, format="%02.0f"
-        ).pack(side="left")
-
-        # Label countdown
-        self.timer_lbl = tk.Label(
-            timer_card, text="", font=("Segoe UI", 8), bg=CARD, fg=SUB
-        )
+        self.timer_lbl = tk.Label(timer, text="", font=("Segoe UI", 8),
+                                   bg=self.CARD, fg=self.SUB)
         self.timer_lbl.pack(pady=(0, 6))
 
-        # ─ Bouton toggle
+        # Bouton toggle
         self.btn = tk.Button(
-            self.root, text="▶  Activer", font=("Segoe UI", 11, "bold"),
-            bg=ACCENT, fg="#1e1e2e", activebackground=ACCENT,
+            parent, text="▶  Activer", font=("Segoe UI", 11, "bold"),
+            bg=self.ACCENT, fg="#1e1e2e", activebackground=self.ACCENT,
             activeforeground="#1e1e2e", relief="flat", cursor="hand2",
-            command=self._toggle, height=1, bd=0
+            command=self._toggle, height=1, bd=0,
         )
-        self.btn.pack(fill="x", padx=16, pady=(4, 6))
+        self.btn.pack(fill="x", padx=8, pady=(6, 4))
 
-        # ─ Footer stats
-        self.footer = tk.Label(
-            self.root, text="Prêt — zzz", font=("Segoe UI", 8), bg=BG, fg=SUB
+        self.footer = tk.Label(parent, text="Prêt — zzz", font=("Segoe UI", 8),
+                                bg=self.BG, fg=self.SUB)
+        self.footer.pack(pady=(2, 4))
+
+    # ── Tab: Transcription ─────────────────────────────
+
+    def _build_tab_transcription(self, parent):
+        card = self._card(parent, top_pad=8)
+
+        # Clé API
+        r1 = self._row(card)
+        self._lbl(r1, "Clé API")
+        self.api_key_var = tk.StringVar(value=self.config.get("mistral_api_key", ""))
+        tk.Entry(r1, textvariable=self.api_key_var, show="\u2022", width=22,
+                 font=("Segoe UI", 8), bg=self.SURFACE, fg=self.TXT,
+                 relief="flat", insertbackground=self.TXT).pack(side="right")
+
+        # Langue
+        r2 = self._row(card, pad_top=2)
+        self._lbl(r2, "Langue")
+        self.lang_var = tk.StringVar(value=self.config.get("language", "Auto"))
+        ttk.Combobox(r2, textvariable=self.lang_var, width=14,
+                     values=[l[0] for l in LANGUAGES], state="readonly",
+                     font=("Segoe UI", 8)).pack(side="right")
+
+        # Raccourci
+        r3 = self._row(card, pad_top=2, pad_bot=2)
+        self._lbl(r3, "Raccourci")
+        tk.Label(r3, text="Ctrl+Alt+R", font=("Segoe UI", 9, "bold"),
+                 bg=self.CARD, fg=self.PINK).pack(side="right")
+
+        # Status
+        self.trans_status = tk.Label(
+            card,
+            text="Prêt" if HAS_TRANSCRIPTION else "pip install mistralai sounddevice numpy pynput",
+            font=("Segoe UI", 8), bg=self.CARD,
+            fg=self.SUB if HAS_TRANSCRIPTION else self.RED,
         )
-        self.footer.pack(pady=(0, 10))
+        self.trans_status.pack(pady=(2, 8))
 
-    # ── Logic ───────────────────────────────────────────
+        # Historique
+        hist = self._card(parent, top_pad=0)
+        tk.Label(hist, text="Historique", font=("Segoe UI", 9, "bold"),
+                 bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
+
+        self.history_list = tk.Listbox(
+            hist, bg=self.SURFACE, fg=self.TXT, selectbackground=self.PINK,
+            selectforeground="#1e1e2e", font=("Segoe UI", 8),
+            relief="flat", borderwidth=0, highlightthickness=0, height=4,
+        )
+        self.history_list.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self._refresh_history()
+
+        btn_row = tk.Frame(hist, bg=self.CARD)
+        btn_row.pack(fill="x", padx=8, pady=(0, 8))
+        self._small_btn(btn_row, "Copier", self._copy_history_item, side="left")
+        self._small_btn(btn_row, "Effacer", self._clear_history, side="left", padx=4)
+
+    # ── Tab: Réglages ──────────────────────────────────
+
+    def _build_tab_settings(self, parent):
+        card = self._card(parent, top_pad=8)
+
+        self.autostart_var = tk.BooleanVar(value=self.config.get("autostart", False))
+        ttk.Checkbutton(card, text="  Démarrer avec Windows",
+                        variable=self.autostart_var, command=self._toggle_autostart
+                        ).pack(anchor="w", padx=12, pady=(10, 2))
+
+        self.tray_var = tk.BooleanVar(
+            value=self.config.get("minimize_to_tray", False) and HAS_TRAY
+        )
+        cb_tray = ttk.Checkbutton(card, text="  Réduire dans le tray",
+                                   variable=self.tray_var)
+        cb_tray.pack(anchor="w", padx=12, pady=(2, 2))
+        if not HAS_TRAY:
+            cb_tray.configure(state="disabled")
+
+        self.sound_var = tk.BooleanVar(value=self.config.get("sound_feedback", True))
+        ttk.Checkbutton(card, text="  Son de feedback",
+                        variable=self.sound_var
+                        ).pack(anchor="w", padx=12, pady=(2, 2))
+
+        self.topmost_var = tk.BooleanVar(value=self.config.get("always_on_top", True))
+        ttk.Checkbutton(card, text="  Toujours au premier plan",
+                        variable=self.topmost_var, command=self._toggle_topmost
+                        ).pack(anchor="w", padx=12, pady=(2, 10))
+
+        # À propos
+        about = self._card(parent, top_pad=0)
+        tk.Label(about, text="À propos", font=("Segoe UI", 9, "bold"),
+                 bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
+        tk.Label(about, text="LetMeSleep v2.0", font=("Segoe UI", 10, "bold"),
+                 bg=self.CARD, fg=self.PINK).pack(anchor="w", padx=12, pady=(0, 2))
+        tk.Label(about,
+                 text="Anti-veille + transcription vocale Voxtral.\n"
+                      "Conçu pour les postes pro sous Windows.",
+                 font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB, justify="left",
+                 ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    # ── UI helpers ─────────────────────────────────────
+
+    def _card(self, parent, top_pad=4):
+        f = tk.Frame(parent, bg=self.CARD,
+                     highlightbackground=self.BORDER, highlightthickness=1)
+        f.pack(fill="x", padx=8, pady=(top_pad, 4))
+        return f
+
+    def _row(self, parent, pad_top=4, pad_bot=2):
+        r = tk.Frame(parent, bg=self.CARD)
+        r.pack(fill="x", padx=12, pady=(pad_top, pad_bot))
+        return r
+
+    def _lbl(self, parent, text, side="left", pad=None):
+        kw = {}
+        if pad:
+            kw["padx"] = pad
+        tk.Label(parent, text=text, font=("Segoe UI", 9),
+                 bg=self.CARD, fg=self.SUB).pack(side=side, **kw)
+
+    def _spinbox(self, parent, var, from_, to, inc, width=5):
+        tk.Spinbox(parent, from_=from_, to=to, increment=inc, width=width,
+                   textvariable=var, font=("Segoe UI", 9),
+                   bg=self.SURFACE, fg=self.TXT, buttonbackground=self.CARD,
+                   relief="flat", insertbackground=self.TXT).pack(side="right")
+
+    def _spinbox_in(self, parent, var, from_, to, inc, width, fmt=None):
+        kw = {}
+        if fmt:
+            kw["format"] = fmt
+        tk.Spinbox(parent, from_=from_, to=to, increment=inc, width=width,
+                   textvariable=var, font=("Segoe UI", 9),
+                   bg=self.SURFACE, fg=self.TXT, buttonbackground=self.CARD,
+                   relief="flat", insertbackground=self.TXT, **kw).pack(side="left")
+
+    def _small_btn(self, parent, text, cmd, side="left", padx=0):
+        tk.Button(parent, text=text, font=("Segoe UI", 8),
+                  bg=self.SURFACE, fg=self.TXT, activebackground=self.BORDER,
+                  activeforeground=self.TXT, relief="flat", cursor="hand2",
+                  command=cmd, bd=0, padx=8, pady=2).pack(side=side, padx=(padx, 0))
+
+    # ── Anti-veille logic ──────────────────────────────
+
     def _parse_stop_time(self):
-        """Retourne un datetime cible ou None."""
         try:
             h = int(self.timer_hour.get())
             m = int(self.timer_min.get())
         except (ValueError, tk.TclError):
             return None
-
         if not (0 <= h <= 23 and 0 <= m <= 59):
             return None
-
         now = datetime.now()
         target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        # Si l'heure est déjà passée aujourd'hui, on vise demain
         if target <= now:
             target += timedelta(days=1)
         return target
@@ -284,7 +465,6 @@ class LetMeSleep:
                 self.distance = max(1, int(self.distance_var.get()))
             except ValueError:
                 self.distance = 5
-
             self.stop_time = self._parse_stop_time()
             self.started_at = datetime.now()
             self.moves = 0
@@ -319,23 +499,17 @@ class LetMeSleep:
                         time.sleep(0.1)
                 else:
                     time.sleep(0.25)
-
-        t = threading.Thread(target=loop, daemon=True)
-        t.start()
+        threading.Thread(target=loop, daemon=True).start()
 
     def _tick_footer(self):
-        """Met à jour le compteur chaque seconde."""
         if self.active and self.started_at:
             elapsed = int((datetime.now() - self.started_at).total_seconds())
             h, rem = divmod(elapsed, 3600)
             m, s = divmod(rem, 60)
-            self.footer.configure(
-                text=f"{h:02d}:{m:02d}:{s:02d}  ·  {self.moves} mvt"
-            )
+            self.footer.configure(text=f"{h:02d}:{m:02d}:{s:02d}  ·  {self.moves} mvt")
         self.root.after(1000, self._tick_footer)
 
     def _tick_timer(self):
-        """Vérifie le timer et affiche le countdown."""
         if self.active and self.stop_time:
             remaining = (self.stop_time - datetime.now()).total_seconds()
             if remaining <= 0:
@@ -345,15 +519,191 @@ class LetMeSleep:
                 h, rem = divmod(int(remaining), 3600)
                 m, s = divmod(rem, 60)
                 self.timer_lbl.configure(
-                    text=f"Arrêt dans {h:02d}:{m:02d}:{s:02d}",
-                    fg=self.PINK
+                    text=f"Arrêt dans {h:02d}:{m:02d}:{s:02d}", fg=self.PINK
                 )
         self.root.after(1000, self._tick_timer)
+
+    # ── Transcription ──────────────────────────────────
+
+    def _init_transcription(self):
+        if not HAS_TRANSCRIPTION:
+            return
+        self._overlay = None
+        self._overlay_hide_id = None
+
+        lang_code = LANG_MAP.get(self.lang_var.get(), "") or None
+
+        def on_status(msg, is_recording):
+            self.root.after(0, lambda: self._handle_trans_status(msg, is_recording))
+
+        def on_result(text):
+            self.root.after(0, lambda: self._add_to_history(text))
+
+        self.transcriber = VoiceTranscriber(
+            api_key=self.api_key_var.get(),
+            language=lang_code,
+            sound=self.sound_var.get(),
+            on_status=on_status,
+            on_result=on_result,
+        )
+        self.transcriber.start()
+
+        # Sync settings live
+        self.api_key_var.trace_add("write", self._sync_transcriber)
+        self.lang_var.trace_add("write", self._sync_transcriber)
+        self.sound_var.trace_add("write", self._sync_transcriber)
+
+    def _sync_transcriber(self, *_):
+        if not self.transcriber:
+            return
+        self.transcriber.update_key(self.api_key_var.get())
+        self.transcriber.update_language(LANG_MAP.get(self.lang_var.get(), "") or None)
+        self.transcriber.sound = self.sound_var.get()
+
+    def _handle_trans_status(self, msg, is_recording):
+        self.trans_status.configure(
+            text=msg, fg=self.PINK if is_recording else self.SUB
+        )
+        self._show_overlay(msg)
+        if not is_recording:
+            if self._overlay_hide_id:
+                self.root.after_cancel(self._overlay_hide_id)
+            self._overlay_hide_id = self.root.after(2000, self._hide_overlay)
+
+    def _show_overlay(self, text):
+        is_rec = "Enregistrement" in text
+        color = self.RED if is_rec else self.SURFACE
+        if self._overlay is None:
+            self._overlay = tk.Toplevel(self.root)
+            self._overlay.overrideredirect(True)
+            self._overlay.attributes("-topmost", True)
+            try:
+                self._overlay.attributes("-alpha", 0.92)
+            except tk.TclError:
+                pass
+            self._overlay_lbl = tk.Label(
+                self._overlay, font=("Segoe UI", 10, "bold"), padx=18, pady=6,
+            )
+            self._overlay_lbl.pack()
+        self._overlay_lbl.configure(text=text, bg=color, fg="white")
+        self._overlay.configure(bg=color)
+        self._overlay.update_idletasks()
+        ow = self._overlay.winfo_reqwidth()
+        sx = (self.root.winfo_screenwidth() - ow) // 2
+        self._overlay.geometry(f"+{sx}+12")
+        self._overlay.deiconify()
+
+    def _hide_overlay(self):
+        if self._overlay:
+            self._overlay.withdraw()
+
+    # ── History ────────────────────────────────────────
+
+    def _refresh_history(self):
+        self.history_list.delete(0, tk.END)
+        for item in self.history[-10:]:
+            display = item[:60] + "..." if len(item) > 60 else item
+            self.history_list.insert(tk.END, display)
+
+    def _add_to_history(self, text):
+        self.history.append(text)
+        self.history = self.history[-10:]
+        self._refresh_history()
+
+    def _copy_history_item(self):
+        sel = self.history_list.curselection()
+        if sel and sel[0] < len(self.history):
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.history[sel[0]])
+
+    def _clear_history(self):
+        self.history.clear()
+        self._refresh_history()
+
+    # ── Settings actions ───────────────────────────────
+
+    def _toggle_autostart(self):
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE,
+            )
+            if self.autostart_var.get():
+                exe = sys.executable
+                if getattr(sys, "frozen", False):
+                    exe = sys.executable
+                winreg.SetValueEx(key, "LetMeSleep", 0, winreg.REG_SZ, f'"{exe}"')
+            else:
+                try:
+                    winreg.DeleteValue(key, "LetMeSleep")
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+    def _toggle_topmost(self):
+        self.root.attributes("-topmost", self.topmost_var.get())
+
+    # ── System Tray ────────────────────────────────────
+
+    def _init_tray(self):
+        if not HAS_TRAY:
+            return
+        png = resource_path("images_transparent.png")
+        if not os.path.exists(png):
+            return
+        try:
+            img = PILImage.open(png)
+            self.tray_icon = pystray.Icon(
+                "letmesleep", img, "LetMeSleep",
+                menu=pystray.Menu(
+                    pystray.MenuItem("Afficher", self._show_from_tray, default=True),
+                    pystray.MenuItem("Quitter", self._quit_from_tray),
+                ),
+            )
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        except Exception:
+            self.tray_icon = None
+
+    def _show_from_tray(self, *_):
+        self.root.after(0, self.root.deiconify)
+
+    def _quit_from_tray(self, *_):
+        self.root.after(0, self._quit)
+
+    def _on_close(self):
+        if self.tray_var.get() and self.tray_icon:
+            self.root.withdraw()
+        else:
+            self._quit()
+
+    # ── Save & Quit ────────────────────────────────────
+
+    def _save_config(self):
+        self.config["mistral_api_key"] = self.api_key_var.get()
+        self.config["language"] = self.lang_var.get()
+        self.config["sound_feedback"] = self.sound_var.get()
+        self.config["minimize_to_tray"] = self.tray_var.get()
+        self.config["autostart"] = self.autostart_var.get()
+        self.config["always_on_top"] = self.topmost_var.get()
+        self.config["history"] = self.history[-10:]
+        save_config(self.config)
 
     def _quit(self):
         self.running = False
         self.active = False
         keep_awake(False)
+        self._save_config()
+        if self.transcriber:
+            self.transcriber.stop()
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
         self.root.destroy()
 
 
