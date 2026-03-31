@@ -5,6 +5,7 @@ Raccourci global : Ctrl+Alt+R (push-to-talk toggle).
 
 import ctypes
 import io
+import sys
 import threading
 import time
 import wave
@@ -23,12 +24,16 @@ CHANNELS = 1
 class VoiceTranscriber:
     """Enregistre au micro, transcrit via Voxtral, colle au curseur."""
 
-    def __init__(self, api_key="", on_status=None):
+    def __init__(self, api_key="", language=None, sound=True,
+                 on_status=None, on_result=None):
         self.api_key = api_key
+        self.language = language   # code ISO ex: "fr", "en", None=auto
+        self.sound = sound
         self.recording = False
         self.frames = []
         self.stream = None
-        self.on_status = on_status  # callback(msg: str, is_recording: bool)
+        self.on_status = on_status    # callback(msg: str, is_recording: bool)
+        self.on_result = on_result    # callback(text: str)
         self._kb = KBController()
         self._listener = None
         self.running = False
@@ -56,6 +61,9 @@ class VoiceTranscriber:
     def update_key(self, key):
         self.api_key = key
 
+    def update_language(self, lang):
+        self.language = lang
+
     # ── Recording ───────────────────────────────────────
 
     def _toggle(self):
@@ -70,6 +78,7 @@ class VoiceTranscriber:
     def _start_rec(self):
         self.recording = True
         self.frames = []
+        self._beep(880, 150)
         self._emit("Enregistrement...", True)
 
         def cb(indata, frames, t, status):
@@ -91,6 +100,8 @@ class VoiceTranscriber:
             self.stream.close()
             self.stream = None
 
+        self._beep(440, 150)
+
         if not self.frames:
             self._emit("Aucun audio capture", False)
             return
@@ -107,6 +118,8 @@ class VoiceTranscriber:
             text = self._transcribe(wav)
             if text:
                 self._paste(text)
+                if self.on_result:
+                    self.on_result(text)
                 n = len(text)
                 self._emit(f"OK — {n} car.", False)
             else:
@@ -127,10 +140,13 @@ class VoiceTranscriber:
 
     def _transcribe(self, wav_buf):
         client = Mistral(api_key=self.api_key)
-        resp = client.audio.transcriptions.complete(
-            model=MODEL,
-            file={"content": wav_buf, "file_name": "recording.wav"},
-        )
+        kwargs = {
+            "model": MODEL,
+            "file": {"content": wav_buf, "file_name": "recording.wav"},
+        }
+        if self.language:
+            kwargs["language"] = self.language
+        resp = client.audio.transcriptions.complete(**kwargs)
         return resp.text.strip() if resp.text else ""
 
     # ── Paste at cursor ─────────────────────────────────
@@ -158,6 +174,15 @@ class VoiceTranscriber:
         u32.CloseClipboard()
 
     # ── Helpers ─────────────────────────────────────────
+
+    def _beep(self, freq, duration):
+        if not self.sound:
+            return
+        if sys.platform == "win32":
+            import winsound
+            threading.Thread(
+                target=lambda: winsound.Beep(freq, duration), daemon=True
+            ).start()
 
     def _emit(self, msg, is_recording):
         if self.on_status:
