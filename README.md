@@ -29,7 +29,8 @@ Built for people who just want their Teams status to stay green while they go ma
 - **Always on top** toggle
 - All preferences saved automatically
 
-  <img width="370" height="501" alt="image" src="https://github.com/user-attachments/assets/73c3b7f6-a66f-4f47-b3a2-0ad111ed9559" />
+  <img width="367" height="451" alt="image" src="https://github.com/user-attachments/assets/1e9882a6-7770-4f8f-8602-eca4c3320e25" />
+
 
 
 ---
