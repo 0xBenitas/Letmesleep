@@ -20,10 +20,11 @@ except ImportError:
     HAS_TRANSCRIPTION = False
 
 try:
-    from tts import TextToSpeechReader
+    from tts import TextToSpeechReader, VOICES as TTS_VOICES
     HAS_TTS = True
 except ImportError:
     HAS_TTS = False
+    TTS_VOICES = []
 
 try:
     import pystray
@@ -209,10 +210,10 @@ class LetMeSleep:
         tab2 = tk.Frame(self.notebook, bg=self.BG)
         tab3 = tk.Frame(self.notebook, bg=self.BG)
         tab4 = tk.Frame(self.notebook, bg=self.BG)
-        self.notebook.add(tab1, text="  Anti-Veille  ")
-        self.notebook.add(tab2, text="  Transcription  ")
-        self.notebook.add(tab3, text="  Lecture  ")
-        self.notebook.add(tab4, text="  Réglages  ")
+        self.notebook.add(tab1, text="  Veille  ")
+        self.notebook.add(tab2, text="  Dictee  ")
+        self.notebook.add(tab3, text="  Parler  ")
+        self.notebook.add(tab4, text="  Config  ")
 
         self._build_tab_antiveille(tab1)
         self._build_tab_transcription(tab2)
@@ -256,11 +257,11 @@ class LetMeSleep:
         self.status_dot = tk.Label(head, text="●", font=("Segoe UI", 12),
                                     bg=self.BG, fg=self.RED)
         self.status_dot.pack(side="right")
-        self.status_lbl = tk.Label(head, text="Inactif", font=("Segoe UI", 9),
+        self.status_lbl = tk.Label(head, text="OFF", font=("Segoe UI", 9),
                                     bg=self.BG, fg=self.SUB)
         self.status_lbl.pack(side="right", padx=(0, 4))
 
-        tk.Label(self.root, text="Anti-veille + Transcription + Lecture vocale",
+        tk.Label(self.root, text="Ton PC ne dormira plus jamais.",
                  font=("Segoe UI", 8), bg=self.BG, fg=self.SUB
                  ).pack(anchor="w", padx=16, pady=(0, 6))
 
@@ -284,11 +285,11 @@ class LetMeSleep:
 
         # Timer
         timer = self._card(parent, top_pad=0)
-        tk.Label(timer, text="Arrêt programmé", font=("Segoe UI", 9, "bold"),
+        tk.Label(timer, text="Minuterie", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
 
         rt = self._row(timer, pad_bot=4)
-        self._lbl(rt, "Arrêter à")
+        self._lbl(rt, "Couper a")
         self.timer_hour = tk.StringVar(value="")
         self.timer_min = tk.StringVar(value="")
         tf = tk.Frame(rt, bg=self.CARD)
@@ -304,14 +305,14 @@ class LetMeSleep:
 
         # Bouton toggle
         self.btn = tk.Button(
-            parent, text="▶  Activer", font=("Segoe UI", 11, "bold"),
+            parent, text="▶  Lancer", font=("Segoe UI", 11, "bold"),
             bg=self.ACCENT, fg="#1e1e2e", activebackground=self.ACCENT,
             activeforeground="#1e1e2e", relief="flat", cursor="hand2",
             command=self._toggle, height=1, bd=0,
         )
         self.btn.pack(fill="x", padx=8, pady=(6, 4))
 
-        self.footer = tk.Label(parent, text="Prêt — zzz", font=("Segoe UI", 8),
+        self.footer = tk.Label(parent, text="En attente... zzz", font=("Segoe UI", 8),
                                 bg=self.BG, fg=self.SUB)
         self.footer.pack(pady=(2, 4))
 
@@ -322,7 +323,7 @@ class LetMeSleep:
 
         # Clé API
         r1 = self._row(card)
-        self._lbl(r1, "Clé API")
+        self._lbl(r1, "Cle Mistral")
         self.api_key_var = tk.StringVar(value=self.config.get("mistral_api_key", ""))
         tk.Entry(r1, textvariable=self.api_key_var, show="\u2022", width=22,
                  font=("Segoe UI", 8), bg=self.SURFACE, fg=self.TXT,
@@ -345,7 +346,7 @@ class LetMeSleep:
         # Status
         self.trans_status = tk.Label(
             card,
-            text="Prêt" if HAS_TRANSCRIPTION else "pip install mistralai sounddevice numpy pynput",
+            text="Pret — Ctrl+Alt+R pour dicter" if HAS_TRANSCRIPTION else "Modules manquants (voir README)",
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TRANSCRIPTION else self.RED,
         )
@@ -374,26 +375,19 @@ class LetMeSleep:
     def _build_tab_tts(self, parent):
         card = self._card(parent, top_pad=8)
 
-        # Vitesse
-        r1 = self._row(card)
-        self._lbl(r1, "Vitesse")
-        self.tts_rate_var = tk.StringVar(value=str(self.config.get("tts_rate", 180)))
-        self._spinbox(r1, self.tts_rate_var, 80, 350, 10)
-        self._lbl(r1, "mots/min", side="right", pad=(0, 4))
-
         # Voix
-        r2 = self._row(card, pad_top=2, pad_bot=8)
-        self._lbl(r2, "Voix")
+        r1 = self._row(card, pad_top=2, pad_bot=8)
+        self._lbl(r1, "Voix")
         self.tts_voice_var = tk.StringVar()
         self.tts_voice_combo = ttk.Combobox(
-            r2, textvariable=self.tts_voice_var, width=18,
+            r1, textvariable=self.tts_voice_var, width=22,
             state="readonly", font=("Segoe UI", 8),
         )
         self.tts_voice_combo.pack(side="right")
 
         # Zone de texte
         text_card = self._card(parent, top_pad=0)
-        tk.Label(text_card, text="Texte a lire", font=("Segoe UI", 9, "bold"),
+        tk.Label(text_card, text="Quoi dire ?", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
 
         self.tts_text = tk.Text(
@@ -427,7 +421,7 @@ class LetMeSleep:
 
         self.tts_status = tk.Label(
             text_card,
-            text="Pret" if HAS_TTS else "pip install pyttsx3",
+            text="Pret" if HAS_TTS else "Module TTS indisponible",
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TTS else self.RED,
         )
@@ -439,39 +433,39 @@ class LetMeSleep:
         card = self._card(parent, top_pad=8)
 
         self.autostart_var = tk.BooleanVar(value=self.config.get("autostart", False))
-        ttk.Checkbutton(card, text="  Démarrer avec Windows",
+        ttk.Checkbutton(card, text="  Lancer au demarrage",
                         variable=self.autostart_var, command=self._toggle_autostart
                         ).pack(anchor="w", padx=12, pady=(10, 2))
 
         self.tray_var = tk.BooleanVar(
             value=self.config.get("minimize_to_tray", False) and HAS_TRAY
         )
-        cb_tray = ttk.Checkbutton(card, text="  Réduire dans le tray",
+        cb_tray = ttk.Checkbutton(card, text="  Planquer dans le tray",
                                    variable=self.tray_var)
         cb_tray.pack(anchor="w", padx=12, pady=(2, 2))
         if not HAS_TRAY:
             cb_tray.configure(state="disabled")
 
         self.sound_var = tk.BooleanVar(value=self.config.get("sound_feedback", True))
-        ttk.Checkbutton(card, text="  Son de feedback",
+        ttk.Checkbutton(card, text="  Bip sonore",
                         variable=self.sound_var
                         ).pack(anchor="w", padx=12, pady=(2, 2))
 
         self.topmost_var = tk.BooleanVar(value=self.config.get("always_on_top", True))
-        ttk.Checkbutton(card, text="  Toujours au premier plan",
+        ttk.Checkbutton(card, text="  Toujours devant",
                         variable=self.topmost_var, command=self._toggle_topmost
                         ).pack(anchor="w", padx=12, pady=(2, 10))
 
         # À propos
         about = self._card(parent, top_pad=0)
-        tk.Label(about, text="À propos", font=("Segoe UI", 9, "bold"),
+        tk.Label(about, text="A propos", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
-        tk.Label(about, text="LetMeSleep v2.0", font=("Segoe UI", 10, "bold"),
+        tk.Label(about, text="LetMeSleep v3.0", font=("Segoe UI", 10, "bold"),
                  bg=self.CARD, fg=self.PINK).pack(anchor="w", padx=12, pady=(0, 2))
         tk.Label(about,
-                 text="Anti-veille + transcription vocale Voxtral\n"
-                      "+ lecture vocale TTS.\n"
-                      "Conçu pour les postes pro sous Windows.",
+                 text="Anti-veille pour PC pro qui veulent dormir.\n"
+                      "Dictee + lecture vocale par Mistral Voxtral.\n"
+                      "Simple. Efficace. Discret.",
                  font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB, justify="left",
                  ).pack(anchor="w", padx=12, pady=(0, 10))
 
@@ -547,9 +541,9 @@ class LetMeSleep:
             self.started_at = datetime.now()
             self.moves = 0
             keep_awake(True)
-            self.btn.configure(text="⏸  Désactiver", bg=self.RED)
+            self.btn.configure(text="⏸  Couper", bg=self.RED)
             self.status_dot.configure(fg=self.GREEN)
-            self.status_lbl.configure(text="Actif")
+            self.status_lbl.configure(text="ON")
         else:
             self._deactivate()
 
@@ -557,10 +551,10 @@ class LetMeSleep:
         self.active = False
         self.stop_time = None
         keep_awake(False)
-        self.btn.configure(text="▶  Activer", bg=self.ACCENT)
+        self.btn.configure(text="▶  Lancer", bg=self.ACCENT)
         self.status_dot.configure(fg=self.RED)
-        self.status_lbl.configure(text="Inactif")
-        self.footer.configure(text="Prêt — zzz")
+        self.status_lbl.configure(text="OFF")
+        self.footer.configure(text="En attente... zzz")
         self.timer_lbl.configure(text="")
 
     def _start_worker(self):
@@ -592,7 +586,7 @@ class LetMeSleep:
             remaining = (self.stop_time - datetime.now()).total_seconds()
             if remaining <= 0:
                 self._deactivate()
-                self.timer_lbl.configure(text="Terminé !", fg=self.PINK)
+                self.timer_lbl.configure(text="Fini !", fg=self.PINK)
             else:
                 h, rem = divmod(int(remaining), 3600)
                 m, s = divmod(rem, 60)
@@ -707,20 +701,23 @@ class LetMeSleep:
         def on_status(msg, is_speaking):
             self.root.after(0, lambda: self._handle_tts_status(msg, is_speaking))
 
+        api_key = self.config.get("mistral_api_key", "")
+        saved_voice = self.config.get("tts_voice", "fr_female")
+
         self.tts_reader = TextToSpeechReader(
-            rate=int(self.tts_rate_var.get()),
+            api_key=api_key,
+            voice_id=saved_voice,
             on_status=on_status,
         )
 
         # Populate voice list
         voices = self.tts_reader.get_voices()
         if voices:
-            names = [v[1] for v in voices]
             self._tts_voice_ids = [v[0] for v in voices]
+            names = [v[1] for v in voices]
             self.tts_voice_combo["values"] = names
-            saved = self.config.get("tts_voice", "")
-            if saved in self._tts_voice_ids:
-                idx = self._tts_voice_ids.index(saved)
+            if saved_voice in self._tts_voice_ids:
+                idx = self._tts_voice_ids.index(saved_voice)
                 self.tts_voice_var.set(names[idx])
             else:
                 self.tts_voice_var.set(names[0])
@@ -731,7 +728,7 @@ class LetMeSleep:
         color = self.PINK if is_speaking else self.SUB
         self.tts_status.configure(text=msg, fg=color)
         if is_speaking:
-            self.tts_play_btn.configure(text="▶  Lecture...", bg=self.RED)
+            self.tts_play_btn.configure(text="▶  Ca parle...", bg=self.RED)
         else:
             self.tts_play_btn.configure(text="▶  Lire", bg=self.ACCENT)
 
@@ -741,7 +738,8 @@ class LetMeSleep:
         text = self.tts_text.get("1.0", tk.END).strip()
         if not text:
             return
-        self.tts_reader.update_rate(int(self.tts_rate_var.get()))
+        # Sync API key
+        self.tts_reader.update_key(self.api_key_var.get())
         voice_id = None
         sel = self.tts_voice_combo.current()
         if sel >= 0 and sel < len(self._tts_voice_ids):
@@ -833,7 +831,6 @@ class LetMeSleep:
         self.config["autostart"] = self.autostart_var.get()
         self.config["always_on_top"] = self.topmost_var.get()
         self.config["history"] = self.history[-10:]
-        self.config["tts_rate"] = int(self.tts_rate_var.get())
         sel = self.tts_voice_combo.current()
         if sel >= 0 and sel < len(self._tts_voice_ids):
             self.config["tts_voice"] = self._tts_voice_ids[sel]
