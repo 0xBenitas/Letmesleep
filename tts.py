@@ -81,7 +81,7 @@ class TextToSpeechReader:
 
     def _run(self, text, voice_id):
         try:
-            self._emit("Generation audio...", True)
+            self._emit("Voxtral reflechit...", True)
             client = Mistral(api_key=self.api_key)
             response = client.audio.speech.complete(
                 model=MODEL,
@@ -134,7 +134,7 @@ class TextToSpeechReader:
                     self._emit("Arrete", False)
                     return
                 self._stop_event.wait(timeout=0.1)
-            self._emit("Lecture terminee", False)
+            self._emit("Fini !", False)
         except Exception as e:
             self._emit(f"Erreur lecture: {e}", False)
 
@@ -147,7 +147,7 @@ class TextToSpeechReader:
             sd.stop()
         except Exception:
             pass
-        self._emit("Arrete", False)
+        self._emit("Stop", False)
 
     def update_key(self, key):
         self.api_key = key
