@@ -11,6 +11,7 @@ a = Analysis(
         ('images_transparent.ico', '.'),
     ],
     hiddenimports=[
+        'tts',
         'transcription',
         'mistralai',
         'sounddevice',
@@ -18,6 +19,7 @@ a = Analysis(
         'pynput',
         'pystray',
         'PIL',
+        '_sounddevice_data',
     ],
     hookspath=[],
     hooksconfig={},
