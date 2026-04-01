@@ -20,10 +20,11 @@ except ImportError:
     HAS_TRANSCRIPTION = False
 
 try:
-    from tts import TextToSpeechReader
+    from tts import TextToSpeechReader, VOICES as TTS_VOICES
     HAS_TTS = True
 except ImportError:
     HAS_TTS = False
+    TTS_VOICES = []
 
 try:
     import pystray
@@ -374,19 +375,12 @@ class LetMeSleep:
     def _build_tab_tts(self, parent):
         card = self._card(parent, top_pad=8)
 
-        # Vitesse
-        r1 = self._row(card)
-        self._lbl(r1, "Vitesse")
-        self.tts_rate_var = tk.StringVar(value=str(self.config.get("tts_rate", 180)))
-        self._spinbox(r1, self.tts_rate_var, 80, 350, 10)
-        self._lbl(r1, "mots/min", side="right", pad=(0, 4))
-
         # Voix
-        r2 = self._row(card, pad_top=2, pad_bot=8)
-        self._lbl(r2, "Voix")
+        r1 = self._row(card, pad_top=2, pad_bot=8)
+        self._lbl(r1, "Voix")
         self.tts_voice_var = tk.StringVar()
         self.tts_voice_combo = ttk.Combobox(
-            r2, textvariable=self.tts_voice_var, width=18,
+            r1, textvariable=self.tts_voice_var, width=22,
             state="readonly", font=("Segoe UI", 8),
         )
         self.tts_voice_combo.pack(side="right")
@@ -427,7 +421,7 @@ class LetMeSleep:
 
         self.tts_status = tk.Label(
             text_card,
-            text="Pret" if HAS_TTS else "pip install pyttsx3",
+            text="Pret" if HAS_TTS else "Module TTS indisponible",
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TTS else self.RED,
         )
@@ -707,20 +701,23 @@ class LetMeSleep:
         def on_status(msg, is_speaking):
             self.root.after(0, lambda: self._handle_tts_status(msg, is_speaking))
 
+        api_key = self.config.get("mistral_api_key", "")
+        saved_voice = self.config.get("tts_voice", "fr_female")
+
         self.tts_reader = TextToSpeechReader(
-            rate=int(self.tts_rate_var.get()),
+            api_key=api_key,
+            voice_id=saved_voice,
             on_status=on_status,
         )
 
         # Populate voice list
         voices = self.tts_reader.get_voices()
         if voices:
-            names = [v[1] for v in voices]
             self._tts_voice_ids = [v[0] for v in voices]
+            names = [v[1] for v in voices]
             self.tts_voice_combo["values"] = names
-            saved = self.config.get("tts_voice", "")
-            if saved in self._tts_voice_ids:
-                idx = self._tts_voice_ids.index(saved)
+            if saved_voice in self._tts_voice_ids:
+                idx = self._tts_voice_ids.index(saved_voice)
                 self.tts_voice_var.set(names[idx])
             else:
                 self.tts_voice_var.set(names[0])
@@ -741,7 +738,8 @@ class LetMeSleep:
         text = self.tts_text.get("1.0", tk.END).strip()
         if not text:
             return
-        self.tts_reader.update_rate(int(self.tts_rate_var.get()))
+        # Sync API key
+        self.tts_reader.update_key(self.api_key_var.get())
         voice_id = None
         sel = self.tts_voice_combo.current()
         if sel >= 0 and sel < len(self._tts_voice_ids):
@@ -833,7 +831,6 @@ class LetMeSleep:
         self.config["autostart"] = self.autostart_var.get()
         self.config["always_on_top"] = self.topmost_var.get()
         self.config["history"] = self.history[-10:]
-        self.config["tts_rate"] = int(self.tts_rate_var.get())
         sel = self.tts_voice_combo.current()
         if sel >= 0 and sel < len(self._tts_voice_ids):
             self.config["tts_voice"] = self._tts_voice_ids[sel]
