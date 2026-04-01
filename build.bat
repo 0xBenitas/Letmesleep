@@ -1,8 +1,8 @@
 @echo off
-echo === LetMeSleep v2.0 — Build ===
+echo === LetMeSleep v3.0 — Build ===
 echo.
 
-:: Installe toutes les dépendances
+:: Installe toutes les dependances
 echo Installation des dependances...
 pip install -r requirements.txt
 if errorlevel 1 (
@@ -17,7 +17,11 @@ pyinstaller letmesleep.spec --clean -y
 
 echo.
 if exist "dist\LetMeSleep.exe" (
-    echo OK ! L'exe est dans : dist\LetMeSleep.exe
+    echo.
+    echo ==========================================
+    echo   OK ! dist\LetMeSleep.exe est pret.
+    echo   Double-clic dessus et c'est parti.
+    echo ==========================================
 ) else (
     echo ERREUR : le build a echoue.
 )
