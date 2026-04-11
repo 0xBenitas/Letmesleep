@@ -37,6 +37,7 @@ class VoiceTranscriber:
         self.on_status = on_status    # callback(msg: str, is_recording: bool)
         self.on_result = on_result    # callback(text: str)
         self._on_level = on_level     # callback(peak: float 0.0-1.0)
+        self._level_counter = 0       # throttle level callbacks
         self._kb = KBController()
         self._listener = None
         self.running = False
@@ -73,6 +74,7 @@ class VoiceTranscriber:
             if self.stream:
                 self.stream.stop()
                 self.stream.close()
+                self.stream = None
         if self._listener:
             self._listener.stop()
 
@@ -98,13 +100,16 @@ class VoiceTranscriber:
 
     def _start_rec(self):
         self.frames = []
+        self._level_counter = 0
 
         def cb(indata, frames, t, status):
             if self.recording:
                 self.frames.append(indata.copy())
                 if self._on_level:
-                    peak = np.max(np.abs(indata)) / 32768.0
-                    self._on_level(peak)
+                    self._level_counter += 1
+                    if self._level_counter % 4 == 0:
+                        peak = np.max(np.abs(indata)) / 32768.0
+                        self._on_level(peak)
 
         try:
             self.stream = sd.InputStream(
@@ -201,7 +206,7 @@ class VoiceTranscriber:
         return buf
 
     def _transcribe(self, wav_buf):
-        client = Mistral(api_key=self.api_key, timeout=30)
+        client = Mistral(api_key=self.api_key, timeout_ms=30000)
         kwargs = {
             "model": MODEL,
             "file": {"content": wav_buf, "file_name": "recording.wav"},
@@ -225,15 +230,18 @@ class VoiceTranscriber:
         CF_UNICODETEXT = 13
         u32 = ctypes.windll.user32
         k32 = ctypes.windll.kernel32
-        u32.OpenClipboard(0)
-        u32.EmptyClipboard()
-        data = text.encode("utf-16-le") + b"\x00\x00"
-        h = k32.GlobalAlloc(0x0042, len(data))
-        p = k32.GlobalLock(h)
-        ctypes.memmove(p, data, len(data))
-        k32.GlobalUnlock(h)
-        u32.SetClipboardData(CF_UNICODETEXT, h)
-        u32.CloseClipboard()
+        if not u32.OpenClipboard(0):
+            return
+        try:
+            u32.EmptyClipboard()
+            data = text.encode("utf-16-le") + b"\x00\x00"
+            h = k32.GlobalAlloc(0x0042, len(data))
+            p = k32.GlobalLock(h)
+            ctypes.memmove(p, data, len(data))
+            k32.GlobalUnlock(h)
+            u32.SetClipboardData(CF_UNICODETEXT, h)
+        finally:
+            u32.CloseClipboard()
 
     # ── Helpers ─────────────────────────────────────────
 

@@ -486,7 +486,7 @@ class LetMeSleep:
         about = self._card(parent, top_pad=0)
         tk.Label(about, text="A propos", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
-        tk.Label(about, text="LetMeSleep v3.0", font=("Segoe UI", 10, "bold"),
+        tk.Label(about, text="LetMeSleep v3.1", font=("Segoe UI", 10, "bold"),
                  bg=self.CARD, fg=self.PINK).pack(anchor="w", padx=12, pady=(0, 2))
         tk.Label(about,
                  text="Anti-veille pour PC pro qui veulent dormir.\n"
@@ -746,33 +746,44 @@ class LetMeSleep:
 
     def _tick_mic_check(self):
         """Verifie les changements de micro toutes les 5 secondes."""
-        if HAS_TRANSCRIPTION:
-            try:
-                current = VoiceTranscriber.list_input_devices()
-                current_names = {d[1] for d in current}
-                cached_names = {d[1] for d in self._mic_devices}
-                if current_names != cached_names:
-                    self._refresh_mic_list()
-                    if self.transcriber:
-                        sel = self.mic_combo.current()
-                        if 0 <= sel < len(self._mic_devices):
-                            self.transcriber.update_device(
-                                self._mic_devices[sel][0]
-                            )
-            except Exception:
-                pass
+        if HAS_TRANSCRIPTION and not (self.transcriber and self.transcriber.recording):
+            def _check():
+                try:
+                    current = VoiceTranscriber.list_input_devices()
+                    current_names = {d[1] for d in current}
+                    cached_names = {d[1] for d in self._mic_devices}
+                    if current_names != cached_names:
+                        self.root.after(0, self._on_mic_devices_changed)
+                except Exception:
+                    pass
+            threading.Thread(target=_check, daemon=True).start()
         self.root.after(5000, self._tick_mic_check)
+
+    def _on_mic_devices_changed(self):
+        """Appele quand la liste des micros a change."""
+        self._refresh_mic_list()
+        if self.transcriber:
+            sel = self.mic_combo.current()
+            if 0 <= sel < len(self._mic_devices):
+                self.transcriber.update_device(self._mic_devices[sel][0])
 
     # ── Recording level bar ────────────────────────────
 
     def _update_rec_level(self, peak):
-        self.rec_level.delete("all")
         if not self.transcriber or not self.transcriber.recording:
+            self.rec_level.delete("all")
             return
         w = self.rec_level.winfo_width()
-        bar_w = int(peak * w)
+        bar_w = min(int(peak * w), w)
         color = self.GREEN if peak < 0.7 else self.PINK
-        self.rec_level.create_rectangle(0, 0, bar_w, 6, fill=color, outline="")
+        if not hasattr(self, "_rec_level_bar") or not self._rec_level_bar:
+            self.rec_level.delete("all")
+            self._rec_level_bar = self.rec_level.create_rectangle(
+                0, 0, bar_w, 6, fill=color, outline=""
+            )
+        else:
+            self.rec_level.coords(self._rec_level_bar, 0, 0, bar_w, 6)
+            self.rec_level.itemconfigure(self._rec_level_bar, fill=color)
 
     # ── Status & overlay ───────────────────────────────
 
@@ -790,6 +801,7 @@ class LetMeSleep:
         self._show_overlay(msg)
         if not is_recording:
             self.rec_level.delete("all")
+            self._rec_level_bar = None
             if self._pulse_id:
                 self.root.after_cancel(self._pulse_id)
                 self._pulse_id = None
@@ -929,7 +941,7 @@ class LetMeSleep:
         self.tts_reader.speak(text, voice_id)
 
     def _tts_stop(self):
-        if HAS_TTS and hasattr(self, "tts_reader"):
+        if self.tts_reader:
             self.tts_reader.stop()
 
     def _tts_paste(self):
@@ -955,8 +967,6 @@ class LetMeSleep:
             )
             if self.autostart_var.get():
                 exe = sys.executable
-                if getattr(sys, "frozen", False):
-                    exe = sys.executable
                 winreg.SetValueEx(key, "LetMeSleep", 0, winreg.REG_SZ, f'"{exe}"')
             else:
                 try:
