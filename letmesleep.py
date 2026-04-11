@@ -718,6 +718,12 @@ class LetMeSleep:
     def _test_mic(self):
         if not HAS_TRANSCRIPTION or not self.transcriber:
             return
+        if self.transcriber.recording:
+            self.mic_status.configure(text="Enregistrement en cours", fg=self.RED)
+            return
+        if not self._mic_devices:
+            self.mic_status.configure(text="Aucun micro detecte", fg=self.RED)
+            return
         sel = self.mic_combo.current()
         dev = self._mic_devices[sel][0] if 0 <= sel < len(self._mic_devices) else None
         self.mic_status.configure(text="Test en cours...", fg=self.PINK)
