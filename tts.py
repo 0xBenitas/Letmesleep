@@ -82,7 +82,7 @@ class TextToSpeechReader:
     def _run(self, text, voice_id):
         try:
             self._emit("Voxtral reflechit...", True)
-            client = Mistral(api_key=self.api_key)
+            client = Mistral(api_key=self.api_key, timeout_ms=30000)
             response = client.audio.speech.complete(
                 model=MODEL,
                 input=text,
