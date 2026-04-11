@@ -25,18 +25,36 @@ class VoiceTranscriber:
     """Enregistre au micro, transcrit via Voxtral, colle au curseur."""
 
     def __init__(self, api_key="", language=None, sound=True,
-                 on_status=None, on_result=None):
+                 device=None, on_status=None, on_result=None,
+                 on_level=None):
         self.api_key = api_key
         self.language = language   # code ISO ex: "fr", "en", None=auto
         self.sound = sound
+        self.device = device       # index sounddevice, None = defaut systeme
         self.recording = False
         self.frames = []
         self.stream = None
         self.on_status = on_status    # callback(msg: str, is_recording: bool)
         self.on_result = on_result    # callback(text: str)
+        self._on_level = on_level     # callback(peak: float 0.0-1.0)
         self._kb = KBController()
         self._listener = None
         self.running = False
+
+    # ── Device enumeration ─────────────────────────────
+
+    @staticmethod
+    def list_input_devices():
+        """Retourne [(index, nom)] des peripheriques d'entree disponibles."""
+        try:
+            devices = sd.query_devices()
+        except Exception:
+            return []
+        result = []
+        for i, dev in enumerate(devices):
+            if dev['max_input_channels'] > 0:
+                result.append((i, dev['name']))
+        return result
 
     # ── Lifecycle ───────────────────────────────────────
 
@@ -64,6 +82,9 @@ class VoiceTranscriber:
     def update_language(self, lang):
         self.language = lang
 
+    def update_device(self, device):
+        self.device = device
+
     # ── Recording ───────────────────────────────────────
 
     def _toggle(self):
@@ -76,22 +97,38 @@ class VoiceTranscriber:
             self._start_rec()
 
     def _start_rec(self):
-        self.recording = True
         self.frames = []
-        self._beep(880, 150)
-        self._emit("Enregistrement...", True)
 
         def cb(indata, frames, t, status):
             if self.recording:
                 self.frames.append(indata.copy())
+                if self._on_level:
+                    peak = np.max(np.abs(indata)) / 32768.0
+                    self._on_level(peak)
 
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            callback=cb,
-        )
-        self.stream.start()
+        try:
+            self.stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype="int16",
+                callback=cb,
+                device=self.device,
+            )
+            self.stream.start()
+        except sd.PortAudioError as e:
+            self.stream = None
+            self.recording = False
+            self._emit(f"Micro introuvable: {e}", False)
+            return
+        except Exception as e:
+            self.stream = None
+            self.recording = False
+            self._emit(f"Erreur micro: {e}", False)
+            return
+
+        self.recording = True
+        self._beep(880, 150)
+        self._emit("Enregistrement...", True)
 
     def _stop_rec(self):
         self.recording = False
@@ -108,6 +145,31 @@ class VoiceTranscriber:
 
         self._emit("Transcription...", False)
         threading.Thread(target=self._process, daemon=True).start()
+
+    # ── Mic test ────────────────────────────────────────
+
+    def test_mic(self, device=None, duration=1.5, callback=None):
+        """Enregistre brievement et detecte si du son est capte."""
+        dev = device if device is not None else self.device
+
+        def _run():
+            try:
+                audio = sd.rec(
+                    int(SAMPLE_RATE * duration),
+                    samplerate=SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    device=dev,
+                )
+                sd.wait()
+                peak = np.max(np.abs(audio)) / 32768.0
+                if callback:
+                    callback(peak > 0.01, peak)
+            except Exception:
+                if callback:
+                    callback(False, 0.0)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ── Transcription ───────────────────────────────────
 
@@ -139,7 +201,7 @@ class VoiceTranscriber:
         return buf
 
     def _transcribe(self, wav_buf):
-        client = Mistral(api_key=self.api_key)
+        client = Mistral(api_key=self.api_key, timeout=30)
         kwargs = {
             "model": MODEL,
             "file": {"content": wav_buf, "file_name": "recording.wav"},

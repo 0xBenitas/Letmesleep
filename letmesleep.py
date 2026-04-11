@@ -193,7 +193,7 @@ class LetMeSleep:
             except tk.TclError:
                 pass
 
-        w, h = 380, 480
+        w, h = 380, 540
         sx = self.root.winfo_screenwidth() - w - 20
         sy = self.root.winfo_screenheight() - h - 60
         self.root.geometry(f"{w}x{h}+{sx}+{sy}")
@@ -319,54 +319,80 @@ class LetMeSleep:
     # ── Tab: Transcription ─────────────────────────────
 
     def _build_tab_transcription(self, parent):
-        card = self._card(parent, top_pad=8)
+        # ── Card Micro ──
+        card_mic = self._card(parent, top_pad=8)
+        tk.Label(card_mic, text="Microphone", font=("Segoe UI", 9, "bold"),
+                 bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(6, 2))
 
-        # Clé API
-        r1 = self._row(card)
+        r_mic = self._row(card_mic, pad_top=2, pad_bot=2)
+        self._lbl(r_mic, "Micro")
+        self.mic_var = tk.StringVar()
+        self.mic_combo = ttk.Combobox(r_mic, textvariable=self.mic_var, width=20,
+                                       state="readonly", font=("Segoe UI", 8))
+        self.mic_combo.pack(side="right")
+        self.mic_combo.bind("<<ComboboxSelected>>", self._on_mic_selected)
+        self._mic_devices = []
+
+        r_test = self._row(card_mic, pad_top=2, pad_bot=2)
+        self._lbl(r_test, "Test")
+        self.test_level = tk.Canvas(r_test, width=80, height=12,
+                                     bg=self.SURFACE, highlightthickness=0)
+        self.test_level.pack(side="right")
+        self._small_btn(r_test, "Tester", self._test_mic, side="right", padx=4)
+
+        self.mic_status = tk.Label(card_mic, text="Detection...",
+                                    font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB)
+        self.mic_status.pack(pady=(0, 6))
+
+        # ── Card Transcription ──
+        card_trans = self._card(parent, top_pad=0)
+
+        r1 = self._row(card_trans)
         self._lbl(r1, "Cle Mistral")
         self.api_key_var = tk.StringVar(value=self.config.get("mistral_api_key", ""))
         tk.Entry(r1, textvariable=self.api_key_var, show="\u2022", width=22,
                  font=("Segoe UI", 8), bg=self.SURFACE, fg=self.TXT,
                  relief="flat", insertbackground=self.TXT).pack(side="right")
 
-        # Langue
-        r2 = self._row(card, pad_top=2)
+        r2 = self._row(card_trans, pad_top=2)
         self._lbl(r2, "Langue")
         self.lang_var = tk.StringVar(value=self.config.get("language", "Auto"))
         ttk.Combobox(r2, textvariable=self.lang_var, width=14,
                      values=[l[0] for l in LANGUAGES], state="readonly",
                      font=("Segoe UI", 8)).pack(side="right")
 
-        # Raccourci
-        r3 = self._row(card, pad_top=2, pad_bot=2)
+        r3 = self._row(card_trans, pad_top=2, pad_bot=2)
         self._lbl(r3, "Raccourci")
         tk.Label(r3, text="Ctrl+Alt+R", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.PINK).pack(side="right")
 
-        # Status
         self.trans_status = tk.Label(
-            card,
+            card_trans,
             text="Pret — Ctrl+Alt+R pour dicter" if HAS_TRANSCRIPTION else "Modules manquants (voir README)",
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TRANSCRIPTION else self.RED,
         )
-        self.trans_status.pack(pady=(2, 8))
+        self.trans_status.pack(pady=(2, 2))
 
-        # Historique
+        self.rec_level = tk.Canvas(card_trans, height=6,
+                                    bg=self.SURFACE, highlightthickness=0)
+        self.rec_level.pack(fill="x", padx=12, pady=(0, 6))
+
+        # ── Card Historique ──
         hist = self._card(parent, top_pad=0)
         tk.Label(hist, text="Historique", font=("Segoe UI", 9, "bold"),
-                 bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
+                 bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(6, 2))
 
         self.history_list = tk.Listbox(
             hist, bg=self.SURFACE, fg=self.TXT, selectbackground=self.PINK,
             selectforeground="#1e1e2e", font=("Segoe UI", 8),
-            relief="flat", borderwidth=0, highlightthickness=0, height=4,
+            relief="flat", borderwidth=0, highlightthickness=0, height=3,
         )
         self.history_list.pack(fill="both", expand=True, padx=8, pady=(0, 4))
         self._refresh_history()
 
         btn_row = tk.Frame(hist, bg=self.CARD)
-        btn_row.pack(fill="x", padx=8, pady=(0, 8))
+        btn_row.pack(fill="x", padx=8, pady=(0, 6))
         self._small_btn(btn_row, "Copier", self._copy_history_item, side="left")
         self._small_btn(btn_row, "Effacer", self._clear_history, side="left", padx=4)
 
@@ -602,6 +628,7 @@ class LetMeSleep:
             return
         self._overlay = None
         self._overlay_hide_id = None
+        self._pulse_id = None
 
         lang_code = LANG_MAP.get(self.lang_var.get(), "") or None
 
@@ -611,12 +638,24 @@ class LetMeSleep:
         def on_result(text):
             self.root.after(0, lambda: self._add_to_history(text))
 
+        def on_level(peak):
+            self.root.after(0, lambda: self._update_rec_level(peak))
+
+        # Resolve saved mic device
+        self._refresh_mic_list()
+        mic_dev = None
+        sel = self.mic_combo.current()
+        if 0 <= sel < len(self._mic_devices):
+            mic_dev = self._mic_devices[sel][0]
+
         self.transcriber = VoiceTranscriber(
             api_key=self.api_key_var.get(),
             language=lang_code,
             sound=self.sound_var.get(),
+            device=mic_dev,
             on_status=on_status,
             on_result=on_result,
+            on_level=on_level,
         )
         self.transcriber.start()
 
@@ -625,6 +664,9 @@ class LetMeSleep:
         self.lang_var.trace_add("write", self._sync_transcriber)
         self.sound_var.trace_add("write", self._sync_transcriber)
 
+        # Start mic polling
+        self._tick_mic_check()
+
     def _sync_transcriber(self, *_):
         if not self.transcriber:
             return
@@ -632,19 +674,144 @@ class LetMeSleep:
         self.transcriber.update_language(LANG_MAP.get(self.lang_var.get(), "") or None)
         self.transcriber.sound = self.sound_var.get()
 
-    def _handle_trans_status(self, msg, is_recording):
-        self.trans_status.configure(
-            text=msg, fg=self.PINK if is_recording else self.SUB
+    # ── Mic management ─────────────────────────────────
+
+    def _refresh_mic_list(self):
+        """Enumere les peripheriques d'entree et peuple le dropdown."""
+        try:
+            devices = VoiceTranscriber.list_input_devices()
+        except Exception:
+            devices = []
+
+        self._mic_devices = devices
+        names = [d[1] for d in devices]
+        self.mic_combo["values"] = names
+
+        if not devices:
+            self.mic_status.configure(text="Aucun micro detecte", fg=self.RED)
+            self.mic_var.set("")
+            return
+
+        saved = self.config.get("mic_device_name", "")
+        selected_idx = 0
+        for i, (dev_idx, name) in enumerate(devices):
+            if name == saved:
+                selected_idx = i
+                break
+
+        self.mic_var.set(names[selected_idx])
+        self.mic_combo.current(selected_idx)
+        self.mic_status.configure(
+            text=f"Micro: {names[selected_idx][:30]}", fg=self.GREEN
         )
+
+    def _on_mic_selected(self, event=None):
+        sel = self.mic_combo.current()
+        if 0 <= sel < len(self._mic_devices):
+            dev_idx, name = self._mic_devices[sel]
+            if self.transcriber:
+                self.transcriber.update_device(dev_idx)
+            self.mic_status.configure(
+                text=f"Micro: {name[:30]}", fg=self.GREEN
+            )
+
+    def _test_mic(self):
+        if not HAS_TRANSCRIPTION or not self.transcriber:
+            return
+        sel = self.mic_combo.current()
+        dev = self._mic_devices[sel][0] if 0 <= sel < len(self._mic_devices) else None
+        self.mic_status.configure(text="Test en cours...", fg=self.PINK)
+        self.test_level.delete("all")
+
+        def on_result(detected, peak):
+            def _update():
+                self.test_level.delete("all")
+                bar_w = int(peak * 80)
+                color = self.GREEN if detected else self.RED
+                self.test_level.create_rectangle(0, 0, bar_w, 12,
+                                                  fill=color, outline="")
+                if detected:
+                    self.mic_status.configure(text="Micro OK !", fg=self.GREEN)
+                else:
+                    self.mic_status.configure(text="Aucun son detecte", fg=self.RED)
+            self.root.after(0, _update)
+
+        self.transcriber.test_mic(device=dev, callback=on_result)
+
+    def _tick_mic_check(self):
+        """Verifie les changements de micro toutes les 5 secondes."""
+        if HAS_TRANSCRIPTION:
+            try:
+                current = VoiceTranscriber.list_input_devices()
+                current_names = {d[1] for d in current}
+                cached_names = {d[1] for d in self._mic_devices}
+                if current_names != cached_names:
+                    self._refresh_mic_list()
+                    if self.transcriber:
+                        sel = self.mic_combo.current()
+                        if 0 <= sel < len(self._mic_devices):
+                            self.transcriber.update_device(
+                                self._mic_devices[sel][0]
+                            )
+            except Exception:
+                pass
+        self.root.after(5000, self._tick_mic_check)
+
+    # ── Recording level bar ────────────────────────────
+
+    def _update_rec_level(self, peak):
+        self.rec_level.delete("all")
+        if not self.transcriber or not self.transcriber.recording:
+            return
+        w = self.rec_level.winfo_width()
+        bar_w = int(peak * w)
+        color = self.GREEN if peak < 0.7 else self.PINK
+        self.rec_level.create_rectangle(0, 0, bar_w, 6, fill=color, outline="")
+
+    # ── Status & overlay ───────────────────────────────
+
+    def _handle_trans_status(self, msg, is_recording):
+        if is_recording:
+            color = self.RED
+        elif "OK" in msg or "Pret" in msg:
+            color = self.GREEN
+        elif "Erreur" in msg or "manquant" in msg or "introuvable" in msg:
+            color = self.RED
+        else:
+            color = self.PINK
+        self.trans_status.configure(text=msg, fg=color)
+
         self._show_overlay(msg)
         if not is_recording:
+            self.rec_level.delete("all")
+            if self._pulse_id:
+                self.root.after_cancel(self._pulse_id)
+                self._pulse_id = None
             if self._overlay_hide_id:
                 self.root.after_cancel(self._overlay_hide_id)
             self._overlay_hide_id = self.root.after(2000, self._hide_overlay)
+        else:
+            self._pulse_overlay()
 
     def _show_overlay(self, text):
         is_rec = "Enregistrement" in text
-        color = self.RED if is_rec else self.SURFACE
+        is_processing = "Transcription" in text
+        is_error = "Erreur" in text or "introuvable" in text
+
+        if is_rec:
+            color = self.RED
+            prefix = "●  "
+        elif is_processing:
+            color = self.ACCENT
+            prefix = ""
+        elif is_error:
+            color = self.RED
+            prefix = ""
+        else:
+            color = self.SURFACE
+            prefix = ""
+
+        display = prefix + text
         if self._overlay is None:
             self._overlay = tk.Toplevel(self.root)
             self._overlay.overrideredirect(True)
@@ -657,13 +824,22 @@ class LetMeSleep:
                 self._overlay, font=("Segoe UI", 10, "bold"), padx=18, pady=6,
             )
             self._overlay_lbl.pack()
-        self._overlay_lbl.configure(text=text, bg=color, fg="white")
+        self._overlay_lbl.configure(text=display, bg=color, fg="white")
         self._overlay.configure(bg=color)
         self._overlay.update_idletasks()
         ow = self._overlay.winfo_reqwidth()
         sx = (self.root.winfo_screenwidth() - ow) // 2
         self._overlay.geometry(f"+{sx}+12")
         self._overlay.deiconify()
+
+    def _pulse_overlay(self):
+        """Pulsation visuelle de l'overlay pendant l'enregistrement."""
+        if self._overlay and self.transcriber and self.transcriber.recording:
+            current = self._overlay_lbl.cget("bg")
+            next_color = "#e06080" if current == self.RED else self.RED
+            self._overlay_lbl.configure(bg=next_color)
+            self._overlay.configure(bg=next_color)
+            self._pulse_id = self.root.after(600, self._pulse_overlay)
 
     def _hide_overlay(self):
         if self._overlay:
@@ -834,6 +1010,9 @@ class LetMeSleep:
         sel = self.tts_voice_combo.current()
         if sel >= 0 and sel < len(self._tts_voice_ids):
             self.config["tts_voice"] = self._tts_voice_ids[sel]
+        mic_sel = self.mic_combo.current()
+        if 0 <= mic_sel < len(self._mic_devices):
+            self.config["mic_device_name"] = self._mic_devices[mic_sel][1]
         save_config(self.config)
 
     def _quit(self):
