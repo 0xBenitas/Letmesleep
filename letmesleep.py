@@ -938,7 +938,8 @@ class LetMeSleep:
             color = self.RED
         elif "OK" in msg or "Prêt" in msg:
             color = self.GREEN
-        elif "Erreur" in msg or "manquant" in msg or "introuvable" in msg:
+        elif ("Erreur" in msg or "manquant" in msg or "introuvable" in msg
+              or "occupé" in msg):
             color = self.RED
         else:
             color = self.PINK
@@ -960,7 +961,7 @@ class LetMeSleep:
     def _show_overlay(self, text):
         is_rec = "Enregistrement" in text
         is_processing = "Transcription" in text
-        is_error = "Erreur" in text or "introuvable" in text
+        is_error = "Erreur" in text or "introuvable" in text or "occupé" in text
 
         if is_rec:
             color = self.RED
@@ -1067,7 +1068,12 @@ class LetMeSleep:
             self._tts_voice_ids = []
 
     def _handle_tts_status(self, msg, is_speaking):
-        color = self.PINK if is_speaking else self.SUB
+        if is_speaking:
+            color = self.PINK
+        elif "Erreur" in msg or "manquant" in msg:
+            color = self.RED
+        else:
+            color = self.SUB
         self.tts_status.configure(text=msg, fg=color)
         if is_speaking:
             self.tts_play_btn.configure(text="▶  Ça parle...", bg=self.RED)

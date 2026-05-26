@@ -254,7 +254,7 @@ class VoiceTranscriber:
         previous = self._get_clipboard()
         time.sleep(0.15)
         if not self._set_clipboard(text):
-            self._emit("Presse-papier occupé — réessayez", False)
+            self._emit("Presse-papier occupé, réessaie", False)
             return False
         with self._kb.pressed(Key.ctrl):
             self._kb.tap("v")
