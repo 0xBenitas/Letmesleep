@@ -152,12 +152,17 @@ class VoiceTranscriber:
 
         self._beep(440, 150)
 
-        if not self.frames:
-            self._emit("Aucun audio capture", False)
+        frames = self.frames
+        self.frames = []   # l'enregistrement suivant repart sur une liste propre
+
+        if not frames:
+            self._emit("Aucun audio capturé", False)
             return
 
         self._emit("Transcription...", False)
-        threading.Thread(target=self._process, daemon=True).start()
+        threading.Thread(
+            target=self._process, args=(frames,), daemon=True
+        ).start()
 
     # ── Mic test ────────────────────────────────────────
 
@@ -189,10 +194,10 @@ class VoiceTranscriber:
 
     # ── Transcription ───────────────────────────────────
 
-    def _process(self):
+    def _process(self, frames):
         import numpy as np
         try:
-            audio = np.concatenate(self.frames)
+            audio = np.concatenate(frames)
             wav = self._to_wav(audio)
             text = self._transcribe(wav)
             if text:
@@ -205,8 +210,6 @@ class VoiceTranscriber:
                 self._emit("Rien détecté", False)
         except Exception as e:
             self._emit(f"Erreur: {e}", False)
-        finally:
-            self.frames = []
 
     @staticmethod
     def _to_wav(audio):

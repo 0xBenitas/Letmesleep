@@ -21,10 +21,10 @@ VOICES = [
     ("Femme neutre", "neutral_female"),
     ("Homme neutre", "neutral_male"),
     ("Femme joyeuse", "cheerful_female"),
-    ("Femme decontractee", "casual_female"),
-    ("Homme decontracte", "casual_male"),
-    ("Francais (femme)", "fr_female"),
-    ("Francais (homme)", "fr_male"),
+    ("Femme décontractée", "casual_female"),
+    ("Homme décontracté", "casual_male"),
+    ("Français (femme)", "fr_female"),
+    ("Français (homme)", "fr_male"),
     ("Espagnol (femme)", "es_female"),
     ("Espagnol (homme)", "es_male"),
     ("Allemand (femme)", "de_female"),
@@ -33,8 +33,8 @@ VOICES = [
     ("Italien (homme)", "it_male"),
     ("Portugais (femme)", "pt_female"),
     ("Portugais (homme)", "pt_male"),
-    ("Neerlandais (femme)", "nl_female"),
-    ("Neerlandais (homme)", "nl_male"),
+    ("Néerlandais (femme)", "nl_female"),
+    ("Néerlandais (homme)", "nl_male"),
     ("Hindi (femme)", "hi_female"),
     ("Hindi (homme)", "hi_male"),
     ("Arabe (homme)", "ar_male"),
@@ -137,7 +137,7 @@ class TextToSpeechReader:
             while sd.get_stream().active:
                 if self._stop_event.is_set():
                     sd.stop()
-                    self._emit("Arrete", False)
+                    self._emit("Arrêté", False)
                     return
                 self._stop_event.wait(timeout=0.1)
             self._emit("Fini !", False)
