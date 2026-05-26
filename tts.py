@@ -5,11 +5,14 @@ Coller du texte, cliquer sur Lire, et l'entendre.
 
 import base64
 import io
+import logging
 import threading
 import wave
 
 # numpy / sounddevice / mistralai sont importes paresseusement (au 1er
 # "Lire") pour ne rien charger en memoire tant que le TTS n'est pas utilise.
+
+log = logging.getLogger(__name__)
 
 MODEL = "voxtral-mini-tts-2603"
 
@@ -65,7 +68,7 @@ class TextToSpeechReader:
             self._emit("Aucun texte", False)
             return
         if not self.api_key:
-            self._emit("Cle API manquante", False)
+            self._emit("Clé API manquante", False)
             return
         if self._speaking:
             self.stop()
@@ -81,7 +84,7 @@ class TextToSpeechReader:
     def _run(self, text, voice_id):
         try:
             from mistralai import Mistral
-            self._emit("Voxtral reflechit...", True)
+            self._emit("Voxtral réfléchit...", True)
             client = Mistral(api_key=self.api_key, timeout_ms=30000)
             response = client.audio.speech.complete(
                 model=MODEL,
@@ -149,8 +152,8 @@ class TextToSpeechReader:
         try:
             import sounddevice as sd
             sd.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Arret lecture echoue: %s", e)
         self._emit("Stop", False)
 
     def update_key(self, key):

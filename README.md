@@ -70,7 +70,7 @@ build.bat
 ## Voice Transcription Setup
 
 1. Get a Mistral API key at [console.mistral.ai](https://console.mistral.ai/)
-2. Paste it in the **Dictee** tab (the same key also powers the **Parler** TTS tab)
+2. Paste it in the **Dictée** tab (the same key also powers the **Parler** TTS tab)
 3. Pick your language (or leave on Auto)
 4. **Ctrl+Alt+R** to start recording, **Ctrl+Alt+R** again to stop & transcribe
 
@@ -85,7 +85,7 @@ The app has 4 tabs:
 | Tab | What it does |
 |-----|-------------|
 | **Veille** | Mouse jiggler settings, timer, on/off toggle |
-| **Dictee** | API key, mic picker, language, hotkey, history |
+| **Dictée** | API key, mic picker, language, hotkey, history |
 | **Parler** | Text-to-speech: paste text, pick a voice, play |
 | **Config** | Autostart, tray, sound, always-on-top, about |
 

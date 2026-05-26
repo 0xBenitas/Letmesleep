@@ -5,6 +5,7 @@ Raccourci global : Ctrl+Alt+R (push-to-talk toggle).
 
 import ctypes
 import io
+import logging
 import sys
 import threading
 import time
@@ -15,6 +16,8 @@ from pynput.keyboard import Controller as KBController, Key
 
 # numpy / sounddevice / mistralai sont importes paresseusement (au 1er
 # enregistrement) pour garder l'empreinte memoire minimale au lancement.
+
+log = logging.getLogger(__name__)
 
 MODEL = "voxtral-mini-latest"
 SAMPLE_RATE = 16000
@@ -50,7 +53,8 @@ class VoiceTranscriber:
         try:
             import sounddevice as sd
             devices = sd.query_devices()
-        except Exception:
+        except Exception as e:
+            log.debug("Enumeration des peripheriques echouee: %s", e)
             return []
         result = []
         for i, dev in enumerate(devices):
@@ -92,7 +96,7 @@ class VoiceTranscriber:
 
     def _toggle(self):
         if not self.api_key:
-            self._emit("Cle API manquante", False)
+            self._emit("Clé API manquante", False)
             return
         if self.recording:
             self._stop_rec()
@@ -176,7 +180,8 @@ class VoiceTranscriber:
                 peak = np.max(np.abs(audio)) / 32768.0
                 if callback:
                     callback(peak > 0.01, peak)
-            except Exception:
+            except Exception as e:
+                log.debug("Test micro echoue: %s", e)
                 if callback:
                     callback(False, 0.0)
 
@@ -197,7 +202,7 @@ class VoiceTranscriber:
                 n = len(text)
                 self._emit(f"OK — {n} car.", False)
             else:
-                self._emit("Rien detecte", False)
+                self._emit("Rien détecté", False)
         except Exception as e:
             self._emit(f"Erreur: {e}", False)
         finally:

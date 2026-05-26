@@ -6,6 +6,7 @@ Conçu pour tourner en arrière-plan sur un PC pro.
 import ctypes
 import importlib.util
 import json
+import logging
 import os
 import sys
 import threading
@@ -13,6 +14,20 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime, timedelta
+
+APP_VERSION = "3.1"
+
+# Logging discret : silencieux par defaut (aucun fichier, aucune sortie).
+# Definir LETMESLEEP_DEBUG=1 pour voir les diagnostics sur stderr.
+if os.environ.get("LETMESLEEP_DEBUG"):
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+else:
+    logging.getLogger().addHandler(logging.NullHandler())
+
+log = logging.getLogger("letmesleep")
 
 
 def _has_modules(*names):
@@ -178,12 +193,14 @@ class LetMeSleep:
         self._wake = threading.Event()   # reveille le worker (toggle/quit)
         self._dictee_ready = False       # micro initialise au 1er affichage
         self._ticking = False            # garde anti-double-boucle horloge UI
+        self._save_after_id = None       # debounce de la sauvegarde config
 
         self._build_ui()
         self._start_worker()
         self._init_transcription()
         self._init_tts()
         self._init_tray()
+        self._wire_autosave()
         self.root.mainloop()
 
     # ── Palette ────────────────────────────────────────
@@ -232,7 +249,7 @@ class LetMeSleep:
         tab3 = tk.Frame(self.notebook, bg=self.BG)
         tab4 = tk.Frame(self.notebook, bg=self.BG)
         self.notebook.add(tab1, text="  Veille  ")
-        self.notebook.add(tab2, text="  Dictee  ")
+        self.notebook.add(tab2, text="  Dictée  ")
         self.notebook.add(tab3, text="  Parler  ")
         self.notebook.add(tab4, text="  Config  ")
 
@@ -313,7 +330,7 @@ class LetMeSleep:
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
 
         rt = self._row(timer, pad_bot=4)
-        self._lbl(rt, "Couper a")
+        self._lbl(rt, "Couper à")
         self.timer_hour = tk.StringVar(value="")
         self.timer_min = tk.StringVar(value="")
         tf = tk.Frame(rt, bg=self.CARD)
@@ -364,7 +381,7 @@ class LetMeSleep:
         self.test_level.pack(side="right")
         self._small_btn(r_test, "Tester", self._test_mic, side="right", padx=4)
 
-        self.mic_status = tk.Label(card_mic, text="Detection...",
+        self.mic_status = tk.Label(card_mic, text="Détection...",
                                     font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB)
         self.mic_status.pack(pady=(0, 6))
 
@@ -372,7 +389,7 @@ class LetMeSleep:
         card_trans = self._card(parent, top_pad=0)
 
         r1 = self._row(card_trans)
-        self._lbl(r1, "Cle Mistral")
+        self._lbl(r1, "Clé Mistral")
         self.api_key_var = tk.StringVar(value=self.config.get("mistral_api_key", ""))
         tk.Entry(r1, textvariable=self.api_key_var, show="\u2022", width=22,
                  font=("Segoe UI", 8), bg=self.SURFACE, fg=self.TXT,
@@ -392,7 +409,7 @@ class LetMeSleep:
 
         self.trans_status = tk.Label(
             card_trans,
-            text="Pret — Ctrl+Alt+R pour dicter" if HAS_TRANSCRIPTION else "Modules manquants (voir README)",
+            text="Prêt — Ctrl+Alt+R pour dicter" if HAS_TRANSCRIPTION else "Modules manquants (voir README)",
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TRANSCRIPTION else self.RED,
         )
@@ -471,7 +488,7 @@ class LetMeSleep:
 
         self.tts_status = tk.Label(
             text_card,
-            text="Pret" if HAS_TTS else "Module TTS indisponible",
+            text="Prêt" if HAS_TTS else "Module TTS indisponible",
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TTS else self.RED,
         )
@@ -483,7 +500,7 @@ class LetMeSleep:
         card = self._card(parent, top_pad=8)
 
         self.autostart_var = tk.BooleanVar(value=self.config.get("autostart", False))
-        ttk.Checkbutton(card, text="  Lancer au demarrage",
+        ttk.Checkbutton(card, text="  Lancer au démarrage",
                         variable=self.autostart_var, command=self._toggle_autostart
                         ).pack(anchor="w", padx=12, pady=(10, 2))
 
@@ -508,13 +525,13 @@ class LetMeSleep:
 
         # À propos
         about = self._card(parent, top_pad=0)
-        tk.Label(about, text="A propos", font=("Segoe UI", 9, "bold"),
+        tk.Label(about, text="À propos", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
-        tk.Label(about, text="LetMeSleep v3.1", font=("Segoe UI", 10, "bold"),
+        tk.Label(about, text=f"LetMeSleep v{APP_VERSION}", font=("Segoe UI", 10, "bold"),
                  bg=self.CARD, fg=self.PINK).pack(anchor="w", padx=12, pady=(0, 2))
         tk.Label(about,
                  text="Anti-veille pour PC pro qui veulent dormir.\n"
-                      "Dictee + lecture vocale par Mistral Voxtral.\n"
+                      "Dictée + lecture vocale par Mistral Voxtral.\n"
                       "Simple. Efficace. Discret.",
                  font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB, justify="left",
                  ).pack(anchor="w", padx=12, pady=(0, 10))
@@ -705,7 +722,8 @@ class LetMeSleep:
         """Enumere les peripheriques d'entree et peuple le dropdown."""
         try:
             devices = VoiceTranscriber.list_input_devices()
-        except Exception:
+        except Exception as e:
+            log.warning("Liste des micros indisponible: %s", e)
             devices = []
 
         self._mic_devices = devices
@@ -713,7 +731,7 @@ class LetMeSleep:
         self.mic_combo["values"] = names
 
         if not devices:
-            self.mic_status.configure(text="Aucun micro detecte", fg=self.RED)
+            self.mic_status.configure(text="Aucun micro détecté", fg=self.RED)
             self.mic_var.set("")
             return
 
@@ -739,6 +757,7 @@ class LetMeSleep:
             self.mic_status.configure(
                 text=f"Micro: {name[:30]}", fg=self.GREEN
             )
+            self._schedule_save()
 
     def _test_mic(self):
         if not HAS_TRANSCRIPTION or not self.transcriber:
@@ -747,7 +766,7 @@ class LetMeSleep:
             self.mic_status.configure(text="Enregistrement en cours", fg=self.RED)
             return
         if not self._mic_devices:
-            self.mic_status.configure(text="Aucun micro detecte", fg=self.RED)
+            self.mic_status.configure(text="Aucun micro détecté", fg=self.RED)
             return
         sel = self.mic_combo.current()
         dev = self._mic_devices[sel][0] if 0 <= sel < len(self._mic_devices) else None
@@ -764,7 +783,7 @@ class LetMeSleep:
                 if detected:
                     self.mic_status.configure(text="Micro OK !", fg=self.GREEN)
                 else:
-                    self.mic_status.configure(text="Aucun son detecte", fg=self.RED)
+                    self.mic_status.configure(text="Aucun son détecté", fg=self.RED)
             self.root.after(0, _update)
 
         self.transcriber.test_mic(device=dev, callback=on_result)
@@ -806,8 +825,8 @@ class LetMeSleep:
                     cached_names = {d[1] for d in self._mic_devices}
                     if current_names != cached_names:
                         self.root.after(0, self._on_mic_devices_changed)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Verification des micros echouee: %s", e)
             threading.Thread(target=_check, daemon=True).start()
         self.root.after(10000, self._tick_mic_check)
 
@@ -842,7 +861,7 @@ class LetMeSleep:
     def _handle_trans_status(self, msg, is_recording):
         if is_recording:
             color = self.RED
-        elif "OK" in msg or "Pret" in msg:
+        elif "OK" in msg or "Prêt" in msg:
             color = self.GREEN
         elif "Erreur" in msg or "manquant" in msg or "introuvable" in msg:
             color = self.RED
@@ -927,6 +946,7 @@ class LetMeSleep:
         self.history.append(text)
         self.history = self.history[-10:]
         self._refresh_history()
+        self._schedule_save()
 
     def _copy_history_item(self):
         sel = self.history_list.curselection()
@@ -937,6 +957,7 @@ class LetMeSleep:
     def _clear_history(self):
         self.history.clear()
         self._refresh_history()
+        self._schedule_save()
 
     # ── TTS actions ────────────────────────────────────
 
@@ -974,7 +995,7 @@ class LetMeSleep:
         color = self.PINK if is_speaking else self.SUB
         self.tts_status.configure(text=msg, fg=color)
         if is_speaking:
-            self.tts_play_btn.configure(text="▶  Ca parle...", bg=self.RED)
+            self.tts_play_btn.configure(text="▶  Ça parle...", bg=self.RED)
         else:
             self.tts_play_btn.configure(text="▶  Lire", bg=self.ACCENT)
 
@@ -1026,8 +1047,8 @@ class LetMeSleep:
                 except FileNotFoundError:
                     pass
             winreg.CloseKey(key)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Demarrage auto (registre) echoue: %s", e)
 
     def _toggle_topmost(self):
         self.root.attributes("-topmost", self.topmost_var.get())
@@ -1050,7 +1071,8 @@ class LetMeSleep:
                 ),
             )
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
-        except Exception:
+        except Exception as e:
+            log.warning("Initialisation du tray echouee: %s", e)
             self.tray_icon = None
 
     def _show_from_tray(self, *_):
@@ -1067,7 +1089,25 @@ class LetMeSleep:
 
     # ── Save & Quit ────────────────────────────────────
 
+    def _wire_autosave(self):
+        """Persiste les preferences des qu'elles changent (debounce 800ms)."""
+        for var in (self.api_key_var, self.lang_var, self.sound_var,
+                    self.tray_var, self.autostart_var, self.topmost_var):
+            var.trace_add("write", lambda *_: self._schedule_save())
+        self.tts_voice_combo.bind(
+            "<<ComboboxSelected>>", lambda e: self._schedule_save(), add="+"
+        )
+
+    def _schedule_save(self):
+        if self._save_after_id is not None:
+            try:
+                self.root.after_cancel(self._save_after_id)
+            except Exception:
+                pass
+        self._save_after_id = self.root.after(800, self._save_config)
+
     def _save_config(self):
+        self._save_after_id = None
         self.config["mistral_api_key"] = self.api_key_var.get()
         self.config["language"] = self.lang_var.get()
         self.config["sound_feedback"] = self.sound_var.get()
@@ -1081,7 +1121,10 @@ class LetMeSleep:
         mic_sel = self.mic_combo.current()
         if 0 <= mic_sel < len(self._mic_devices):
             self.config["mic_device_name"] = self._mic_devices[mic_sel][1]
-        save_config(self.config)
+        try:
+            save_config(self.config)
+        except OSError as e:
+            log.warning("Sauvegarde de la config echouee: %s", e)
 
     def _quit(self):
         self.running = False
@@ -1096,8 +1139,8 @@ class LetMeSleep:
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Arret du tray echoue: %s", e)
         self.root.destroy()
 
 
