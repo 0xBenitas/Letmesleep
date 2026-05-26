@@ -16,38 +16,64 @@ log = logging.getLogger(__name__)
 
 MODEL = "voxtral-mini-tts-2603"
 
-# Voix pre-configurees disponibles via l'API Mistral
+# Messages d'etat, ton decontracte, FR + EN. Repli sur "fr" si cle absente.
+STRINGS = {
+    "fr": {
+        "no_text": "Rien à lire",
+        "key_missing": "Pas de clé API",
+        "thinking": "Voxtral cogite...",
+        "playing": "Ça cause...",
+        "done": "Et voilà !",
+        "error": "Aïe : {e}",
+        "error_play": "Couac lecture : {e}",
+        "stopped": "Coupé",
+    },
+    "en": {
+        "no_text": "Nothing to read",
+        "key_missing": "No API key",
+        "thinking": "Voxtral is thinking...",
+        "playing": "Talking...",
+        "done": "There you go!",
+        "error": "Oops: {e}",
+        "error_play": "Playback hiccup: {e}",
+        "stopped": "Stopped",
+    },
+}
+
+# Voix pre-configurees Mistral : (id, {langue_ui: libelle affiche}).
 VOICES = [
-    ("Femme neutre", "neutral_female"),
-    ("Homme neutre", "neutral_male"),
-    ("Femme joyeuse", "cheerful_female"),
-    ("Femme décontractée", "casual_female"),
-    ("Homme décontracté", "casual_male"),
-    ("Français (femme)", "fr_female"),
-    ("Français (homme)", "fr_male"),
-    ("Espagnol (femme)", "es_female"),
-    ("Espagnol (homme)", "es_male"),
-    ("Allemand (femme)", "de_female"),
-    ("Allemand (homme)", "de_male"),
-    ("Italien (femme)", "it_female"),
-    ("Italien (homme)", "it_male"),
-    ("Portugais (femme)", "pt_female"),
-    ("Portugais (homme)", "pt_male"),
-    ("Néerlandais (femme)", "nl_female"),
-    ("Néerlandais (homme)", "nl_male"),
-    ("Hindi (femme)", "hi_female"),
-    ("Hindi (homme)", "hi_male"),
-    ("Arabe (homme)", "ar_male"),
+    ("neutral_female", {"fr": "Femme neutre", "en": "Neutral female"}),
+    ("neutral_male", {"fr": "Homme neutre", "en": "Neutral male"}),
+    ("cheerful_female", {"fr": "Femme joyeuse", "en": "Cheerful female"}),
+    ("casual_female", {"fr": "Femme décontractée", "en": "Casual female"}),
+    ("casual_male", {"fr": "Homme décontracté", "en": "Casual male"}),
+    ("fr_female", {"fr": "Français (femme)", "en": "French (female)"}),
+    ("fr_male", {"fr": "Français (homme)", "en": "French (male)"}),
+    ("es_female", {"fr": "Espagnol (femme)", "en": "Spanish (female)"}),
+    ("es_male", {"fr": "Espagnol (homme)", "en": "Spanish (male)"}),
+    ("de_female", {"fr": "Allemand (femme)", "en": "German (female)"}),
+    ("de_male", {"fr": "Allemand (homme)", "en": "German (male)"}),
+    ("it_female", {"fr": "Italien (femme)", "en": "Italian (female)"}),
+    ("it_male", {"fr": "Italien (homme)", "en": "Italian (male)"}),
+    ("pt_female", {"fr": "Portugais (femme)", "en": "Portuguese (female)"}),
+    ("pt_male", {"fr": "Portugais (homme)", "en": "Portuguese (male)"}),
+    ("nl_female", {"fr": "Néerlandais (femme)", "en": "Dutch (female)"}),
+    ("nl_male", {"fr": "Néerlandais (homme)", "en": "Dutch (male)"}),
+    ("hi_female", {"fr": "Hindi (femme)", "en": "Hindi (female)"}),
+    ("hi_male", {"fr": "Hindi (homme)", "en": "Hindi (male)"}),
+    ("ar_male", {"fr": "Arabe (homme)", "en": "Arabic (male)"}),
 ]
 
 
 class TextToSpeechReader:
     """Lit du texte a voix haute via Mistral Voxtral TTS."""
 
-    def __init__(self, api_key="", voice_id="fr_female", on_status=None):
+    def __init__(self, api_key="", voice_id="fr_female", on_status=None,
+                 lang="fr"):
         self.api_key = api_key
         self.voice_id = voice_id
         self.on_status = on_status
+        self.lang = lang if lang in STRINGS else "fr"   # langue de l'UI
         self._thread = None
         self._speaking = False
         self._lock = threading.Lock()
@@ -58,18 +84,17 @@ class TextToSpeechReader:
     def speaking(self):
         return self._speaking
 
-    @staticmethod
-    def get_voices():
-        """Retourne la liste des voix disponibles [(id, name), ...]."""
-        return [(vid, name) for name, vid in VOICES]
+    def get_voices(self):
+        """Retourne [(id, libelle)] dans la langue de l'UI (repli FR)."""
+        return [(vid, names.get(self.lang, names["fr"])) for vid, names in VOICES]
 
     def speak(self, text, voice_id=None):
         """Lance la lecture du texte dans un thread separe."""
         if not text.strip():
-            self._emit("Aucun texte", False)
+            self._emit(self._t("no_text"), False, "info")
             return
         if not self.api_key:
-            self._emit("Clé API manquante", False)
+            self._emit(self._t("key_missing"), False, "error")
             return
 
         # Nouvelle generation : on signale l'ancien event (le thread en cours
@@ -99,7 +124,7 @@ class TextToSpeechReader:
     def _run(self, text, voice_id, gen, stop_event):
         try:
             from mistralai import Mistral
-            self._emit_if_current(gen, "Voxtral réfléchit...", True)
+            self._emit_if_current(gen, self._t("thinking"), True, "busy")
             client = Mistral(api_key=self.api_key, timeout_ms=30000)
             response = client.audio.speech.complete(
                 model=MODEL,
@@ -114,7 +139,7 @@ class TextToSpeechReader:
             self._play_wav(audio_bytes, gen, stop_event)
 
         except Exception as e:
-            self._emit_if_current(gen, f"Erreur: {e}", False)
+            self._emit_if_current(gen, self._t("error", e=e), False, "error")
         finally:
             with self._lock:
                 if gen == self._generation:
@@ -146,7 +171,7 @@ class TextToSpeechReader:
         if stop_event.is_set():
             return
 
-        self._emit_if_current(gen, "Lecture en cours...", True)
+        self._emit_if_current(gen, self._t("playing"), True, "rec")
         try:
             sd.play(audio, samplerate=sample_rate)
             # Attendre la fin ou un stop (propre a cette lecture).
@@ -159,9 +184,9 @@ class TextToSpeechReader:
                         sd.stop()
                     return
                 stop_event.wait(timeout=0.1)
-            self._emit_if_current(gen, "Fini !", False)
+            self._emit_if_current(gen, self._t("done"), False, "ok")
         except Exception as e:
-            self._emit_if_current(gen, f"Erreur lecture: {e}", False)
+            self._emit_if_current(gen, self._t("error_play", e=e), False, "error")
 
     def stop(self):
         """Arrete la lecture en cours."""
@@ -174,7 +199,7 @@ class TextToSpeechReader:
             sd.stop()
         except Exception as e:
             log.debug("Arret lecture echoue: %s", e)
-        self._emit("Stop", False)
+        self._emit(self._t("stopped"), False, "info")
 
     def update_key(self, key):
         self.api_key = key
@@ -182,12 +207,17 @@ class TextToSpeechReader:
     def update_voice(self, voice_id):
         self.voice_id = voice_id
 
-    def _emit(self, msg, is_speaking):
-        if self.on_status:
-            self.on_status(msg, is_speaking)
+    def _t(self, key, **kw):
+        s = STRINGS.get(self.lang, STRINGS["fr"]).get(key) \
+            or STRINGS["fr"].get(key, key)
+        return s.format(**kw) if kw else s
 
-    def _emit_if_current(self, gen, msg, is_speaking):
+    def _emit(self, msg, is_speaking, kind="info"):
+        if self.on_status:
+            self.on_status(msg, is_speaking, kind)
+
+    def _emit_if_current(self, gen, msg, is_speaking, kind="info"):
         # N'affiche le statut que si la lecture est toujours d'actualite :
         # un thread annule (stop ou nouvelle lecture) ne pollue pas l'UI.
         if gen == self._generation:
-            self._emit(msg, is_speaking)
+            self._emit(msg, is_speaking, kind)

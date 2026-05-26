@@ -23,15 +23,44 @@ MODEL = "voxtral-mini-latest"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
+# Messages d'etat, ton decontracte, FR + EN. Repli sur "fr" si cle absente.
+STRINGS = {
+    "fr": {
+        "key_missing": "Pas de clé API",
+        "mic_not_found": "Micro aux abonnés absents : {e}",
+        "mic_error": "Couac micro : {e}",
+        "recording": "Je t'écoute...",
+        "no_audio": "Rien capté",
+        "transcribing": "Je gribouille...",
+        "ok_chars": "Et voilà — {n} car.",
+        "nothing": "J'ai rien entendu",
+        "error": "Aïe : {e}",
+        "clipboard_busy": "Presse-papier occupé, réessaie",
+    },
+    "en": {
+        "key_missing": "No API key",
+        "mic_not_found": "Mic is MIA: {e}",
+        "mic_error": "Mic hiccup: {e}",
+        "recording": "I'm all ears...",
+        "no_audio": "Caught nothing",
+        "transcribing": "Scribbling...",
+        "ok_chars": "There you go — {n} chars",
+        "nothing": "Heard nothing",
+        "error": "Oops: {e}",
+        "clipboard_busy": "Clipboard's busy, try again",
+    },
+}
+
 
 class VoiceTranscriber:
     """Enregistre au micro, transcrit via Voxtral, colle au curseur."""
 
     def __init__(self, api_key="", language=None, sound=True,
                  device=None, on_status=None, on_result=None,
-                 on_level=None):
+                 on_level=None, lang="fr"):
         self.api_key = api_key
         self.language = language   # code ISO ex: "fr", "en", None=auto
+        self.lang = lang if lang in STRINGS else "fr"   # langue de l'UI
         self.sound = sound
         self.device = device       # index sounddevice, None = defaut systeme
         self.recording = False
@@ -111,7 +140,7 @@ class VoiceTranscriber:
 
     def _toggle(self):
         if not self.api_key:
-            self._emit("Clé API manquante", False)
+            self._emit(self._t("key_missing"), False, "error")
             return
         if self.recording:
             self._stop_rec()
@@ -146,17 +175,17 @@ class VoiceTranscriber:
         except sd.PortAudioError as e:
             self.stream = None
             self.recording = False
-            self._emit(f"Micro introuvable: {e}", False)
+            self._emit(self._t("mic_not_found", e=e), False, "error")
             return
         except Exception as e:
             self.stream = None
             self.recording = False
-            self._emit(f"Erreur micro: {e}", False)
+            self._emit(self._t("mic_error", e=e), False, "error")
             return
 
         self.recording = True
         self._beep(880, 150)
-        self._emit("Enregistrement...", True)
+        self._emit(self._t("recording"), True, "rec")
 
     def _stop_rec(self):
         self._close_stream()
@@ -166,10 +195,10 @@ class VoiceTranscriber:
         self.frames = []   # l'enregistrement suivant repart sur une liste propre
 
         if not frames:
-            self._emit("Aucun audio capturé", False)
+            self._emit(self._t("no_audio"), False, "info")
             return
 
-        self._emit("Transcription...", False)
+        self._emit(self._t("transcribing"), False, "busy")
         threading.Thread(
             target=self._process, args=(frames,), daemon=True
         ).start()
@@ -215,12 +244,12 @@ class VoiceTranscriber:
                 if self.on_result:
                     self.on_result(text)   # historise meme si le collage echoue
                 if pasted:
-                    self._emit(f"OK — {len(text)} car.", False)
+                    self._emit(self._t("ok_chars", n=len(text)), False, "ok")
                 # sinon _paste a deja emis le message d'erreur
             else:
-                self._emit("Rien détecté", False)
+                self._emit(self._t("nothing"), False, "info")
         except Exception as e:
-            self._emit(f"Erreur: {e}", False)
+            self._emit(self._t("error", e=e), False, "error")
 
     @staticmethod
     def _to_wav(audio):
@@ -254,7 +283,7 @@ class VoiceTranscriber:
         previous = self._get_clipboard()
         time.sleep(0.15)
         if not self._set_clipboard(text):
-            self._emit("Presse-papier occupé, réessaie", False)
+            self._emit(self._t("clipboard_busy"), False, "error")
             return False
         with self._kb.pressed(Key.ctrl):
             self._kb.tap("v")
@@ -379,6 +408,11 @@ class VoiceTranscriber:
                 target=lambda: winsound.Beep(freq, duration), daemon=True
             ).start()
 
-    def _emit(self, msg, is_recording):
+    def _t(self, key, **kw):
+        s = STRINGS.get(self.lang, STRINGS["fr"]).get(key) \
+            or STRINGS["fr"].get(key, key)
+        return s.format(**kw) if kw else s
+
+    def _emit(self, msg, is_recording, kind="info"):
         if self.on_status:
-            self.on_status(msg, is_recording)
+            self.on_status(msg, is_recording, kind)
