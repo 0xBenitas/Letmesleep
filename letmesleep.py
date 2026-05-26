@@ -4,6 +4,7 @@ Conçu pour tourner en arrière-plan sur un PC pro.
 """
 
 import ctypes
+import importlib.util
 import json
 import os
 import sys
@@ -13,15 +14,27 @@ import tkinter as tk
 from tkinter import ttk
 from datetime import datetime, timedelta
 
+
+def _has_modules(*names):
+    """Verifie la presence des deps sans les importer (zero cout memoire)."""
+    try:
+        return all(importlib.util.find_spec(n) is not None for n in names)
+    except (ImportError, ValueError):
+        return False
+
+
+# transcription / tts n'importent plus numpy/sounddevice/mistralai au top :
+# leurs deps lourdes sont chargees paresseusement (cf. modules). On detecte
+# la disponibilite via find_spec, sans rien charger en memoire au lancement.
 try:
     from transcription import VoiceTranscriber
-    HAS_TRANSCRIPTION = True
+    HAS_TRANSCRIPTION = _has_modules("numpy", "sounddevice", "mistralai", "pynput")
 except ImportError:
     HAS_TRANSCRIPTION = False
 
 try:
     from tts import TextToSpeechReader, VOICES as TTS_VOICES
-    HAS_TTS = True
+    HAS_TTS = _has_modules("numpy", "sounddevice", "mistralai")
 except ImportError:
     HAS_TTS = False
     TTS_VOICES = []
@@ -57,14 +70,21 @@ class INPUT(ctypes.Structure):
     ]
 
 
+# Struct reutilisee a chaque tick (le worker est mono-thread) — evite une
+# allocation ctypes a chaque mouvement.
+_MOVE_EXTRA = ctypes.c_ulong(0)
+_MOVE_INPUT = INPUT()
+_MOVE_INPUT.type = INPUT_MOUSE
+_MOVE_INPUT.mi.dwFlags = MOUSEEVENTF_MOVE
+_MOVE_INPUT.mi.dwExtraInfo = ctypes.pointer(_MOVE_EXTRA)
+
+
 def move_mouse(dx, dy):
-    inp = INPUT()
-    inp.type = INPUT_MOUSE
-    inp.mi.dx = dx
-    inp.mi.dy = dy
-    inp.mi.dwFlags = MOUSEEVENTF_MOVE
-    inp.mi.dwExtraInfo = ctypes.pointer(ctypes.c_ulong(0))
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    _MOVE_INPUT.mi.dx = dx
+    _MOVE_INPUT.mi.dy = dy
+    ctypes.windll.user32.SendInput(
+        1, ctypes.byref(_MOVE_INPUT), ctypes.sizeof(_MOVE_INPUT)
+    )
 
 
 ES_CONTINUOUS = 0x80000000
@@ -155,11 +175,12 @@ class LetMeSleep:
 
         self.tts_reader = None
         self._tts_voice_ids = []
+        self._wake = threading.Event()   # reveille le worker (toggle/quit)
+        self._dictee_ready = False       # micro initialise au 1er affichage
+        self._ticking = False            # garde anti-double-boucle horloge UI
 
         self._build_ui()
         self._start_worker()
-        self._tick_footer()
-        self._tick_timer()
         self._init_transcription()
         self._init_tts()
         self._init_tray()
@@ -219,6 +240,9 @@ class LetMeSleep:
         self._build_tab_transcription(tab2)
         self._build_tab_tts(tab3)
         self._build_tab_settings(tab4)
+
+        # Initialise le micro seulement quand l'onglet Dictee est ouvert.
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _apply_ttk_style(self):
         s = ttk.Style()
@@ -570,6 +594,10 @@ class LetMeSleep:
             self.btn.configure(text="⏸  Couper", bg=self.RED)
             self.status_dot.configure(fg=self.GREEN)
             self.status_lbl.configure(text="ON")
+            self._wake.set()        # debloque le worker
+            if not self._ticking:   # une seule boucle d'horloge a la fois
+                self._ticking = True
+                self._tick_status()
         else:
             self._deactivate()
 
@@ -577,6 +605,7 @@ class LetMeSleep:
         self.active = False
         self.stop_time = None
         keep_awake(False)
+        self._wake.set()            # interrompt l'attente d'intervalle du worker
         self.btn.configure(text="▶  Lancer", bg=self.ACCENT)
         self.status_dot.configure(fg=self.RED)
         self.status_lbl.configure(text="OFF")
@@ -591,35 +620,38 @@ class LetMeSleep:
                     move_mouse(dx * self.distance, dy * self.distance)
                     self.step += 1
                     self.moves += 1
-                    for _ in range(self.interval * 10):
-                        if not self.running or not self.active:
-                            break
-                        time.sleep(0.1)
+                    # Attente interruptible : 1 reveil par intervalle, et
+                    # reponse immediate au toggle off / quit.
+                    self._wake.wait(timeout=self.interval)
                 else:
-                    time.sleep(0.25)
+                    # Bloque sans consommer de CPU tant qu'inactif.
+                    self._wake.wait()
+                self._wake.clear()
         threading.Thread(target=loop, daemon=True).start()
 
-    def _tick_footer(self):
-        if self.active and self.started_at:
+    def _tick_status(self):
+        """Horloge UI 1s — ne tourne que pendant que le jiggler est actif."""
+        if not self.active:
+            self._ticking = False
+            return
+        if self.started_at:
             elapsed = int((datetime.now() - self.started_at).total_seconds())
             h, rem = divmod(elapsed, 3600)
             m, s = divmod(rem, 60)
             self.footer.configure(text=f"{h:02d}:{m:02d}:{s:02d}  ·  {self.moves} mvt")
-        self.root.after(1000, self._tick_footer)
-
-    def _tick_timer(self):
-        if self.active and self.stop_time:
+        if self.stop_time:
             remaining = (self.stop_time - datetime.now()).total_seconds()
             if remaining <= 0:
                 self._deactivate()
                 self.timer_lbl.configure(text="Fini !", fg=self.PINK)
-            else:
-                h, rem = divmod(int(remaining), 3600)
-                m, s = divmod(rem, 60)
-                self.timer_lbl.configure(
-                    text=f"Arrêt dans {h:02d}:{m:02d}:{s:02d}", fg=self.PINK
-                )
-        self.root.after(1000, self._tick_timer)
+                self._ticking = False
+                return
+            h, rem = divmod(int(remaining), 3600)
+            m, s = divmod(rem, 60)
+            self.timer_lbl.configure(
+                text=f"Arrêt dans {h:02d}:{m:02d}:{s:02d}", fg=self.PINK
+            )
+        self.root.after(1000, self._tick_status)
 
     # ── Transcription ──────────────────────────────────
 
@@ -641,18 +673,14 @@ class LetMeSleep:
         def on_level(peak):
             self.root.after(0, lambda: self._update_rec_level(peak))
 
-        # Resolve saved mic device
-        self._refresh_mic_list()
-        mic_dev = None
-        sel = self.mic_combo.current()
-        if 0 <= sel < len(self._mic_devices):
-            mic_dev = self._mic_devices[sel][0]
-
+        # device=None : micro systeme par defaut. L'enumeration des micros
+        # (qui charge sounddevice) est differee a l'ouverture de l'onglet
+        # Dictee, mais le hotkey global est actif des le lancement.
         self.transcriber = VoiceTranscriber(
             api_key=self.api_key_var.get(),
             language=lang_code,
             sound=self.sound_var.get(),
-            device=mic_dev,
+            device=None,
             on_status=on_status,
             on_result=on_result,
             on_level=on_level,
@@ -663,9 +691,6 @@ class LetMeSleep:
         self.api_key_var.trace_add("write", self._sync_transcriber)
         self.lang_var.trace_add("write", self._sync_transcriber)
         self.sound_var.trace_add("write", self._sync_transcriber)
-
-        # Start mic polling
-        self._tick_mic_check()
 
     def _sync_transcriber(self, *_):
         if not self.transcriber:
@@ -744,9 +769,36 @@ class LetMeSleep:
 
         self.transcriber.test_mic(device=dev, callback=on_result)
 
+    def _on_tab_changed(self, event=None):
+        try:
+            idx = self.notebook.index(self.notebook.select())
+        except tk.TclError:
+            return
+        if idx == 1:  # onglet Dictee
+            self._ensure_dictee_ready()
+
+    def _ensure_dictee_ready(self):
+        """Enumere les micros au 1er affichage de l'onglet (charge sounddevice)."""
+        if self._dictee_ready or not HAS_TRANSCRIPTION or not self.transcriber:
+            return
+        self._dictee_ready = True
+        self._refresh_mic_list()
+        sel = self.mic_combo.current()
+        if 0 <= sel < len(self._mic_devices):
+            self.transcriber.update_device(self._mic_devices[sel][0])
+        self._tick_mic_check()
+
     def _tick_mic_check(self):
-        """Verifie les changements de micro toutes les 5 secondes."""
-        if HAS_TRANSCRIPTION and not (self.transcriber and self.transcriber.recording):
+        """Verifie les changements de micro — seulement quand l'onglet Dictee
+        est visible, pour ne rien consommer en arriere-plan."""
+        if not self.running:
+            return
+        try:
+            on_dictee = self.notebook.index(self.notebook.select()) == 1
+        except tk.TclError:
+            on_dictee = False
+        if (on_dictee and HAS_TRANSCRIPTION
+                and not (self.transcriber and self.transcriber.recording)):
             def _check():
                 try:
                     current = VoiceTranscriber.list_input_devices()
@@ -757,7 +809,7 @@ class LetMeSleep:
                 except Exception:
                     pass
             threading.Thread(target=_check, daemon=True).start()
-        self.root.after(5000, self._tick_mic_check)
+        self.root.after(10000, self._tick_mic_check)
 
     def _on_mic_devices_changed(self):
         """Appele quand la liste des micros a change."""
@@ -1034,6 +1086,7 @@ class LetMeSleep:
     def _quit(self):
         self.running = False
         self.active = False
+        self._wake.set()        # debloque le worker pour qu'il termine
         keep_awake(False)
         self._save_config()
         if self.transcriber:

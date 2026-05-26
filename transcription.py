@@ -10,11 +10,11 @@ import threading
 import time
 import wave
 
-import numpy as np
-import sounddevice as sd
-from mistralai import Mistral
 from pynput import keyboard
 from pynput.keyboard import Controller as KBController, Key
+
+# numpy / sounddevice / mistralai sont importes paresseusement (au 1er
+# enregistrement) pour garder l'empreinte memoire minimale au lancement.
 
 MODEL = "voxtral-mini-latest"
 SAMPLE_RATE = 16000
@@ -48,6 +48,7 @@ class VoiceTranscriber:
     def list_input_devices():
         """Retourne [(index, nom)] des peripheriques d'entree disponibles."""
         try:
+            import sounddevice as sd
             devices = sd.query_devices()
         except Exception:
             return []
@@ -99,6 +100,9 @@ class VoiceTranscriber:
             self._start_rec()
 
     def _start_rec(self):
+        import numpy as np
+        import sounddevice as sd
+
         self.frames = []
         self._level_counter = 0
 
@@ -159,6 +163,8 @@ class VoiceTranscriber:
 
         def _run():
             try:
+                import numpy as np
+                import sounddevice as sd
                 audio = sd.rec(
                     int(SAMPLE_RATE * duration),
                     samplerate=SAMPLE_RATE,
@@ -179,6 +185,7 @@ class VoiceTranscriber:
     # ── Transcription ───────────────────────────────────
 
     def _process(self):
+        import numpy as np
         try:
             audio = np.concatenate(self.frames)
             wav = self._to_wav(audio)
@@ -193,6 +200,8 @@ class VoiceTranscriber:
                 self._emit("Rien detecte", False)
         except Exception as e:
             self._emit(f"Erreur: {e}", False)
+        finally:
+            self.frames = []
 
     @staticmethod
     def _to_wav(audio):
@@ -206,6 +215,7 @@ class VoiceTranscriber:
         return buf
 
     def _transcribe(self, wav_buf):
+        from mistralai import Mistral
         client = Mistral(api_key=self.api_key, timeout_ms=30000)
         kwargs = {
             "model": MODEL,
@@ -228,19 +238,38 @@ class VoiceTranscriber:
     @staticmethod
     def _set_clipboard(text):
         CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0042  # MOVEABLE | ZEROINIT
         u32 = ctypes.windll.user32
         k32 = ctypes.windll.kernel32
+        # restype/argtypes obligatoires sinon les handles 64-bit sont
+        # tronques a 32-bit (corruption / crash sur Python 64-bit).
+        k32.GlobalAlloc.restype = ctypes.c_void_p
+        k32.GlobalAlloc.argtypes = (ctypes.c_uint, ctypes.c_size_t)
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalLock.argtypes = (ctypes.c_void_p,)
+        k32.GlobalUnlock.argtypes = (ctypes.c_void_p,)
+        k32.GlobalFree.restype = ctypes.c_void_p
+        k32.GlobalFree.argtypes = (ctypes.c_void_p,)
+        u32.SetClipboardData.restype = ctypes.c_void_p
+        u32.SetClipboardData.argtypes = (ctypes.c_uint, ctypes.c_void_p)
+
         if not u32.OpenClipboard(0):
             return
+        h = None
         try:
             u32.EmptyClipboard()
             data = text.encode("utf-16-le") + b"\x00\x00"
-            h = k32.GlobalAlloc(0x0042, len(data))
+            h = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not h:
+                return
             p = k32.GlobalLock(h)
             ctypes.memmove(p, data, len(data))
             k32.GlobalUnlock(h)
-            u32.SetClipboardData(CF_UNICODETEXT, h)
+            if u32.SetClipboardData(CF_UNICODETEXT, h):
+                h = None  # ownership transfere au systeme, ne pas liberer
         finally:
+            if h:
+                k32.GlobalFree(h)
             u32.CloseClipboard()
 
     # ── Helpers ─────────────────────────────────────────

@@ -8,9 +8,8 @@ import io
 import threading
 import wave
 
-import numpy as np
-import sounddevice as sd
-from mistralai import Mistral
+# numpy / sounddevice / mistralai sont importes paresseusement (au 1er
+# "Lire") pour ne rien charger en memoire tant que le TTS n'est pas utilise.
 
 MODEL = "voxtral-mini-tts-2603"
 
@@ -81,6 +80,7 @@ class TextToSpeechReader:
 
     def _run(self, text, voice_id):
         try:
+            from mistralai import Mistral
             self._emit("Voxtral reflechit...", True)
             client = Mistral(api_key=self.api_key, timeout_ms=30000)
             response = client.audio.speech.complete(
@@ -103,6 +103,9 @@ class TextToSpeechReader:
 
     def _play_wav(self, wav_bytes):
         """Decode et joue un fichier WAV via sounddevice."""
+        import numpy as np
+        import sounddevice as sd
+
         buf = io.BytesIO(wav_bytes)
         with wave.open(buf, "rb") as wf:
             sample_rate = wf.getframerate()
@@ -144,6 +147,7 @@ class TextToSpeechReader:
         with self._lock:
             self._speaking = False
         try:
+            import sounddevice as sd
             sd.stop()
         except Exception:
             pass
