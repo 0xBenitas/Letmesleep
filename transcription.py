@@ -237,11 +237,56 @@ class VoiceTranscriber:
     # ── Paste at cursor ─────────────────────────────────
 
     def _paste(self, text):
-        """Copie dans le presse-papier puis Ctrl+V."""
+        """Copie dans le presse-papier, colle au curseur (Ctrl+V), puis
+        restaure le presse-papier precedent (texte) en arriere-plan."""
+        previous = self._get_clipboard()
         time.sleep(0.15)
         self._set_clipboard(text)
         with self._kb.pressed(Key.ctrl):
             self._kb.tap("v")
+        if previous is not None:
+            # On laisse l'app cible lire le collage avant de restaurer, et on
+            # le fait en arriere-plan pour ne pas retarder le statut "OK".
+            threading.Timer(
+                0.5, self._restore_clipboard, args=(previous,)
+            ).start()
+
+    def _restore_clipboard(self, text):
+        try:
+            self._set_clipboard(text)
+        except Exception as e:
+            log.debug("Restauration presse-papier echouee: %s", e)
+
+    @staticmethod
+    def _get_clipboard():
+        """Lit le texte du presse-papier (CF_UNICODETEXT), ou None si vide,
+        non-texte, ou inaccessible — auquel cas on ne restaurera rien."""
+        CF_UNICODETEXT = 13
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        u32.GetClipboardData.restype = ctypes.c_void_p
+        u32.GetClipboardData.argtypes = (ctypes.c_uint,)
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalLock.argtypes = (ctypes.c_void_p,)
+        k32.GlobalUnlock.argtypes = (ctypes.c_void_p,)
+
+        if not u32.OpenClipboard(0):
+            return None
+        try:
+            if not u32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+                return None
+            h = u32.GetClipboardData(CF_UNICODETEXT)
+            if not h:
+                return None
+            p = k32.GlobalLock(h)
+            if not p:
+                return None
+            try:
+                return ctypes.wstring_at(p)
+            finally:
+                k32.GlobalUnlock(h)
+        finally:
+            u32.CloseClipboard()
 
     @staticmethod
     def _set_clipboard(text):

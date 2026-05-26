@@ -52,6 +52,7 @@ class TextToSpeechReader:
         self._speaking = False
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._generation = 0   # incremente a chaque speak()/stop()
 
     @property
     def speaking(self):
@@ -70,21 +71,35 @@ class TextToSpeechReader:
         if not self.api_key:
             self._emit("Clé API manquante", False)
             return
-        if self._speaking:
-            self.stop()
 
-        self._stop_event.clear()
-        self._speaking = True
+        # Nouvelle generation : on signale l'ancien event (le thread en cours
+        # le voit et s'arrete) et on en cree un neuf pour cette lecture. Pas
+        # de .clear() partage, donc aucun risque que l'ancien thread reparte.
+        with self._lock:
+            self._generation += 1
+            gen = self._generation
+            self._stop_event.set()
+            self._stop_event = threading.Event()
+            stop_event = self._stop_event
+            self._speaking = True
+
+        # Coupe immediatement le son d'une eventuelle lecture precedente.
+        try:
+            import sounddevice as sd
+            sd.stop()
+        except Exception as e:
+            log.debug("Arret lecture echoue: %s", e)
+
         vid = voice_id or self.voice_id
         self._thread = threading.Thread(
-            target=self._run, args=(text, vid), daemon=True
+            target=self._run, args=(text, vid, gen, stop_event), daemon=True
         )
         self._thread.start()
 
-    def _run(self, text, voice_id):
+    def _run(self, text, voice_id, gen, stop_event):
         try:
             from mistralai import Mistral
-            self._emit("Voxtral réfléchit...", True)
+            self._emit_if_current(gen, "Voxtral réfléchit...", True)
             client = Mistral(api_key=self.api_key, timeout_ms=30000)
             response = client.audio.speech.complete(
                 model=MODEL,
@@ -92,19 +107,20 @@ class TextToSpeechReader:
                 voice_id=voice_id,
                 response_format="wav",
             )
-            if self._stop_event.is_set():
+            if stop_event.is_set():
                 return
 
             audio_bytes = base64.b64decode(response.audio_data)
-            self._play_wav(audio_bytes)
+            self._play_wav(audio_bytes, gen, stop_event)
 
         except Exception as e:
-            self._emit(f"Erreur: {e}", False)
+            self._emit_if_current(gen, f"Erreur: {e}", False)
         finally:
             with self._lock:
-                self._speaking = False
+                if gen == self._generation:
+                    self._speaking = False
 
-    def _play_wav(self, wav_bytes):
+    def _play_wav(self, wav_bytes, gen, stop_event):
         """Decode et joue un fichier WAV via sounddevice."""
         import numpy as np
         import sounddevice as sd
@@ -127,27 +143,27 @@ class TextToSpeechReader:
         if n_channels > 1:
             audio = audio.reshape(-1, n_channels)
 
-        if self._stop_event.is_set():
+        if stop_event.is_set():
             return
 
-        self._emit("Lecture en cours...", True)
+        self._emit_if_current(gen, "Lecture en cours...", True)
         try:
             sd.play(audio, samplerate=sample_rate)
-            # Attendre la fin ou un stop
+            # Attendre la fin ou un stop (propre a cette lecture).
             while sd.get_stream().active:
-                if self._stop_event.is_set():
+                if stop_event.is_set():
                     sd.stop()
-                    self._emit("Arrêté", False)
-                    return
-                self._stop_event.wait(timeout=0.1)
-            self._emit("Fini !", False)
+                    return  # l'arret est annonce par stop()/speak()
+                stop_event.wait(timeout=0.1)
+            self._emit_if_current(gen, "Fini !", False)
         except Exception as e:
-            self._emit(f"Erreur lecture: {e}", False)
+            self._emit_if_current(gen, f"Erreur lecture: {e}", False)
 
     def stop(self):
         """Arrete la lecture en cours."""
-        self._stop_event.set()
         with self._lock:
+            self._generation += 1   # invalide la lecture courante
+            self._stop_event.set()
             self._speaking = False
         try:
             import sounddevice as sd
@@ -165,3 +181,9 @@ class TextToSpeechReader:
     def _emit(self, msg, is_speaking):
         if self.on_status:
             self.on_status(msg, is_speaking)
+
+    def _emit_if_current(self, gen, msg, is_speaking):
+        # N'affiche le statut que si la lecture est toujours d'actualite :
+        # un thread annule (stop ou nouvelle lecture) ne pollue pas l'UI.
+        if gen == self._generation:
+            self._emit(msg, is_speaking)
