@@ -339,7 +339,7 @@ STRINGS = {
         "mic_recording_busy": "Already listening",
         "mic_testing": "Make some noise!",
         "mic_ok": "Sweet, it hears you!",
-        "mic_no_sound": "I hear nothing",
+        "mic_no_sound": "Crickets...",
         "key_label": "Mistral key",
         "lang_label": "Language",
         "shortcut_label": "Shortcut",
