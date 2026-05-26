@@ -1,5 +1,5 @@
 @echo off
-echo === LetMeSleep v3.0 — Build ===
+echo === LetMeSleep v3.1 — Build ===
 echo.
 
 :: Installe toutes les dependances

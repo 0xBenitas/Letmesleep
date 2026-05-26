@@ -19,8 +19,14 @@ Built for people who just want their Teams status to stay green while they go ma
 - Press **Ctrl+Alt+R** anywhere → speak → press again → text appears at your cursor
 - Powered by [Mistral's Voxtral API](https://docs.mistral.ai/capabilities/audio/speech_to_text/) — fast, accurate, multilingual
 - **13 languages** supported (French, English, Spanish, German, Chinese, Japanese, Korean, Arabic, Hindi, Portuguese, Italian, Russian, Dutch)
+- Microphone picker with live level meter and a one-click mic test
 - Floating overlay so you know when you're recording
 - Transcription history — copy any previous result with one click
+
+### 🔊 Text-to-Speech (Voxtral TTS)
+- Paste any text, pick a voice, hit **Lire** → hear it out loud
+- 20 preset voices across multiple languages and styles (neutral, cheerful, casual)
+- Powered by the same Mistral key — no extra setup
 
 ### ⚙️ Settings
 - **Start with Windows** — checkbox, done
@@ -64,7 +70,7 @@ build.bat
 ## Voice Transcription Setup
 
 1. Get a Mistral API key at [console.mistral.ai](https://console.mistral.ai/)
-2. Paste it in the **Transcription** tab
+2. Paste it in the **Dictee** tab (the same key also powers the **Parler** TTS tab)
 3. Pick your language (or leave on Auto)
 4. **Ctrl+Alt+R** to start recording, **Ctrl+Alt+R** again to stop & transcribe
 
@@ -74,13 +80,14 @@ The transcribed text gets pasted wherever your cursor is — Slack, Word, Notepa
 
 ## UI
 
-The app has 3 tabs:
+The app has 4 tabs:
 
 | Tab | What it does |
 |-----|-------------|
-| **Anti-Veille** | Mouse jiggler settings, timer, on/off toggle |
-| **Transcription** | API key, language picker, hotkey, history |
-| **Réglages** | Autostart, tray, sound, always-on-top, about |
+| **Veille** | Mouse jiggler settings, timer, on/off toggle |
+| **Dictee** | API key, mic picker, language, hotkey, history |
+| **Parler** | Text-to-speech: paste text, pick a voice, play |
+| **Config** | Autostart, tray, sound, always-on-top, about |
 
 > *The UI uses the Catppuccin Mocha theme because we have taste.*
 
