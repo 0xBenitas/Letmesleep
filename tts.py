@@ -152,8 +152,12 @@ class TextToSpeechReader:
             # Attendre la fin ou un stop (propre a cette lecture).
             while sd.get_stream().active:
                 if stop_event.is_set():
-                    sd.stop()
-                    return  # l'arret est annonce par stop()/speak()
+                    # Ne couper le flux partage que si c'est toujours NOTRE
+                    # lecture : un worker perime ne doit pas tuer la nouvelle
+                    # (stop()/speak() ont deja appele sd.stop() au besoin).
+                    if gen == self._generation:
+                        sd.stop()
+                    return
                 stop_event.wait(timeout=0.1)
             self._emit_if_current(gen, "Fini !", False)
         except Exception as e:

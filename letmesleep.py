@@ -3,6 +3,7 @@ LetMeSleep — Anti-veille + Transcription vocale + Lecture vocale (TTS).
 Conçu pour tourner en arrière-plan sur un PC pro.
 """
 
+import base64
 import ctypes
 import importlib.util
 import json
@@ -47,11 +48,10 @@ except ImportError:
     HAS_TRANSCRIPTION = False
 
 try:
-    from tts import TextToSpeechReader, VOICES as TTS_VOICES
+    from tts import TextToSpeechReader
     HAS_TTS = _has_modules("numpy", "sounddevice", "mistralai")
 except ImportError:
     HAS_TTS = False
-    TTS_VOICES = []
 
 try:
     import pystray
@@ -133,17 +133,92 @@ def config_dir():
 CONFIG_FILE = os.path.join(config_dir(), "config.json")
 
 
+# Le secret (cle API) est chiffre au repos via Windows DPAPI, lie a la
+# session Windows de l'utilisateur. Prefixe pour reconnaitre le format et
+# migrer en douceur une valeur encore stockee en clair.
+_DPAPI_PREFIX = "dpapi:"
+_SECRET_KEYS = ("mistral_api_key",)
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_ulong),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi(fn_name, data):
+    """Appelle CryptProtectData / CryptUnprotectData. Renvoie les octets
+    resultants, ou None (echec / hors Windows)."""
+    if sys.platform != "win32" or not data:
+        return None
+    try:
+        crypt32 = ctypes.windll.crypt32
+        k32 = ctypes.windll.kernel32
+        k32.LocalFree.argtypes = (ctypes.c_void_p,)
+        fn = getattr(crypt32, fn_name)
+        buf = ctypes.create_string_buffer(data, len(data))
+        blob_in = _DATA_BLOB(len(data),
+                             ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        if not fn(ctypes.byref(blob_in), None, None, None, None, 0,
+                  ctypes.byref(blob_out)):
+            return None
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            k32.LocalFree(ctypes.cast(blob_out.pbData, ctypes.c_void_p))
+    except Exception as e:
+        log.debug("DPAPI %s echec: %s", fn_name, e)
+        return None
+
+
+def _encrypt_secret(plain):
+    """Chiffre une chaine -> 'dpapi:<base64>'. Si le chiffrement echoue
+    (hors Windows, etc.), renvoie la valeur en clair telle quelle — pas de
+    perte de la cle, comportement identique a avant."""
+    if not plain:
+        return plain
+    enc = _dpapi("CryptProtectData", plain.encode("utf-8"))
+    if enc is None:
+        return plain
+    return _DPAPI_PREFIX + base64.b64encode(enc).decode("ascii")
+
+
+def _decrypt_secret(stored):
+    """Dechiffre 'dpapi:<base64>'. Une valeur sans prefixe est rendue telle
+    quelle (migration depuis l'ancien format en clair)."""
+    if not isinstance(stored, str) or not stored.startswith(_DPAPI_PREFIX):
+        return stored
+    try:
+        raw = base64.b64decode(stored[len(_DPAPI_PREFIX):])
+    except Exception:
+        return ""
+    dec = _dpapi("CryptUnprotectData", raw)
+    return dec.decode("utf-8", "ignore") if dec is not None else ""
+
+
 def load_config():
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    for k in _SECRET_KEYS:
+        if k in data:
+            data[k] = _decrypt_secret(data[k])
+    return data
 
 
 def save_config(data):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    out = dict(data)
+    for k in _SECRET_KEYS:
+        if out.get(k):
+            out[k] = _encrypt_secret(out[k])
+    # Ecriture atomique : un crash en cours d'ecriture ne corrompt pas la
+    # config existante (on remplace seulement une fois le fichier complet).
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, CONFIG_FILE)
 
 
 # ── Constantes ────────────────────────────────────────
@@ -193,6 +268,7 @@ class LetMeSleep:
         self._dictee_ready = False       # micro initialise au 1er affichage
         self._ticking = False            # garde anti-double-boucle horloge UI
         self._save_after_id = None       # debounce de la sauvegarde config
+        self._quitting = False           # garde anti-double fermeture
 
         self._build_ui()
         self._start_worker()
@@ -1038,8 +1114,13 @@ class LetMeSleep:
                 0, winreg.KEY_SET_VALUE,
             )
             if self.autostart_var.get():
-                exe = sys.executable
-                winreg.SetValueEx(key, "LetMeSleep", 0, winreg.REG_SZ, f'"{exe}"')
+                if getattr(sys, "frozen", False):
+                    cmd = f'"{sys.executable}"'
+                else:
+                    # Depuis les sources : sinon le registre lancerait python.exe
+                    # seul, sans notre script.
+                    cmd = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                winreg.SetValueEx(key, "LetMeSleep", 0, winreg.REG_SZ, cmd)
             else:
                 try:
                     winreg.DeleteValue(key, "LetMeSleep")
@@ -1126,6 +1207,9 @@ class LetMeSleep:
             log.warning("Sauvegarde de la config echouee: %s", e)
 
     def _quit(self):
+        if self._quitting:      # tray + WM_DELETE peuvent tous deux appeler
+            return
+        self._quitting = True
         self.running = False
         self.active = False
         self._wake.set()        # debloque le worker pour qu'il termine
