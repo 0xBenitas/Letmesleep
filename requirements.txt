@@ -1,13 +1,13 @@
-pyinstaller>=6.0
+pyinstaller>=6.0,<7.0
 
 # Transcription vocale (Voxtral)
-mistralai>=1.0
-sounddevice>=0.4
-numpy>=1.24
-pynput>=1.7
+mistralai>=1.0,<2.0
+sounddevice>=0.4,<0.6
+numpy>=1.24,<3.0
+pynput>=1.7,<2.0
 
-# Lecture vocale (TTS) — utilise mistralai + sounddevice (deja inclus)
+# Lecture vocale (TTS) — utilise mistralai + sounddevice (déjà inclus)
 
 # System tray (optionnel)
-pystray>=0.19
-Pillow>=10.0
+pystray>=0.19,<0.20
+Pillow>=10.0,<12.0

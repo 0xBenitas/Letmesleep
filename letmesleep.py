@@ -3,28 +3,55 @@ LetMeSleep — Anti-veille + Transcription vocale + Lecture vocale (TTS).
 Conçu pour tourner en arrière-plan sur un PC pro.
 """
 
+import base64
 import ctypes
+import importlib.util
 import json
+import logging
 import os
 import sys
 import threading
-import time
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime, timedelta
 
+APP_VERSION = "3.1"
+
+# Logging discret : silencieux par defaut (aucun fichier, aucune sortie).
+# Definir LETMESLEEP_DEBUG=1 pour voir les diagnostics sur stderr.
+if os.environ.get("LETMESLEEP_DEBUG"):
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+else:
+    logging.getLogger().addHandler(logging.NullHandler())
+
+log = logging.getLogger("letmesleep")
+
+
+def _has_modules(*names):
+    """Verifie la presence des deps sans les importer (zero cout memoire)."""
+    try:
+        return all(importlib.util.find_spec(n) is not None for n in names)
+    except (ImportError, ValueError):
+        return False
+
+
+# transcription / tts n'importent plus numpy/sounddevice/mistralai au top :
+# leurs deps lourdes sont chargees paresseusement (cf. modules). On detecte
+# la disponibilite via find_spec, sans rien charger en memoire au lancement.
 try:
     from transcription import VoiceTranscriber
-    HAS_TRANSCRIPTION = True
+    HAS_TRANSCRIPTION = _has_modules("numpy", "sounddevice", "mistralai", "pynput")
 except ImportError:
     HAS_TRANSCRIPTION = False
 
 try:
-    from tts import TextToSpeechReader, VOICES as TTS_VOICES
-    HAS_TTS = True
+    from tts import TextToSpeechReader
+    HAS_TTS = _has_modules("numpy", "sounddevice", "mistralai")
 except ImportError:
     HAS_TTS = False
-    TTS_VOICES = []
 
 try:
     import pystray
@@ -57,14 +84,21 @@ class INPUT(ctypes.Structure):
     ]
 
 
+# Struct reutilisee a chaque tick (le worker est mono-thread) — evite une
+# allocation ctypes a chaque mouvement.
+_MOVE_EXTRA = ctypes.c_ulong(0)
+_MOVE_INPUT = INPUT()
+_MOVE_INPUT.type = INPUT_MOUSE
+_MOVE_INPUT.mi.dwFlags = MOUSEEVENTF_MOVE
+_MOVE_INPUT.mi.dwExtraInfo = ctypes.pointer(_MOVE_EXTRA)
+
+
 def move_mouse(dx, dy):
-    inp = INPUT()
-    inp.type = INPUT_MOUSE
-    inp.mi.dx = dx
-    inp.mi.dy = dy
-    inp.mi.dwFlags = MOUSEEVENTF_MOVE
-    inp.mi.dwExtraInfo = ctypes.pointer(ctypes.c_ulong(0))
-    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    _MOVE_INPUT.mi.dx = dx
+    _MOVE_INPUT.mi.dy = dy
+    ctypes.windll.user32.SendInput(
+        1, ctypes.byref(_MOVE_INPUT), ctypes.sizeof(_MOVE_INPUT)
+    )
 
 
 ES_CONTINUOUS = 0x80000000
@@ -99,17 +133,92 @@ def config_dir():
 CONFIG_FILE = os.path.join(config_dir(), "config.json")
 
 
+# Le secret (cle API) est chiffre au repos via Windows DPAPI, lie a la
+# session Windows de l'utilisateur. Prefixe pour reconnaitre le format et
+# migrer en douceur une valeur encore stockee en clair.
+_DPAPI_PREFIX = "dpapi:"
+_SECRET_KEYS = ("mistral_api_key",)
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_ulong),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi(fn_name, data):
+    """Appelle CryptProtectData / CryptUnprotectData. Renvoie les octets
+    resultants, ou None (echec / hors Windows)."""
+    if sys.platform != "win32" or not data:
+        return None
+    try:
+        crypt32 = ctypes.windll.crypt32
+        k32 = ctypes.windll.kernel32
+        k32.LocalFree.argtypes = (ctypes.c_void_p,)
+        fn = getattr(crypt32, fn_name)
+        buf = ctypes.create_string_buffer(data, len(data))
+        blob_in = _DATA_BLOB(len(data),
+                             ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+        blob_out = _DATA_BLOB()
+        if not fn(ctypes.byref(blob_in), None, None, None, None, 0,
+                  ctypes.byref(blob_out)):
+            return None
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            k32.LocalFree(ctypes.cast(blob_out.pbData, ctypes.c_void_p))
+    except Exception as e:
+        log.debug("DPAPI %s echec: %s", fn_name, e)
+        return None
+
+
+def _encrypt_secret(plain):
+    """Chiffre une chaine -> 'dpapi:<base64>'. Si le chiffrement echoue
+    (hors Windows, etc.), renvoie la valeur en clair telle quelle — pas de
+    perte de la cle, comportement identique a avant."""
+    if not plain:
+        return plain
+    enc = _dpapi("CryptProtectData", plain.encode("utf-8"))
+    if enc is None:
+        return plain
+    return _DPAPI_PREFIX + base64.b64encode(enc).decode("ascii")
+
+
+def _decrypt_secret(stored):
+    """Dechiffre 'dpapi:<base64>'. Une valeur sans prefixe est rendue telle
+    quelle (migration depuis l'ancien format en clair)."""
+    if not isinstance(stored, str) or not stored.startswith(_DPAPI_PREFIX):
+        return stored
+    try:
+        raw = base64.b64decode(stored[len(_DPAPI_PREFIX):])
+    except Exception:
+        return ""
+    dec = _dpapi("CryptUnprotectData", raw)
+    return dec.decode("utf-8", "ignore") if dec is not None else ""
+
+
 def load_config():
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    for k in _SECRET_KEYS:
+        if k in data:
+            data[k] = _decrypt_secret(data[k])
+    return data
 
 
 def save_config(data):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    out = dict(data)
+    for k in _SECRET_KEYS:
+        if out.get(k):
+            out[k] = _encrypt_secret(out[k])
+    # Ecriture atomique : un crash en cours d'ecriture ne corrompt pas la
+    # config existante (on remplace seulement une fois le fichier complet).
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, CONFIG_FILE)
 
 
 # ── Constantes ────────────────────────────────────────
@@ -136,6 +245,134 @@ LANGUAGES = [
 LANG_MAP = {name: code for name, code in LANGUAGES}
 
 
+# ── Langues de l'interface ────────────────────────────
+# Appliquees au demarrage (cf. ui_language dans la config). Ton volontairement
+# leger : l'app garde ton PC eveille pendant que tu dors.
+
+UI_LANGS = [("Français", "fr"), ("English", "en")]
+
+STRINGS = {
+    "fr": {
+        "tab_sleep": "  Caféine  ",
+        "tab_dictation": "  Dictée  ",
+        "tab_speak": "  Parler  ",
+        "tab_settings": "  Config  ",
+        "tagline": "Ton PC reste réveillé. Toi, va dodo.",
+        "interval": "Intervalle",
+        "sec": "sec",
+        "distance": "Distance",
+        "px": "px",
+        "timer": "Minuterie",
+        "stop_at": "Couper à",
+        "btn_start": "▶  Réveille-le",
+        "btn_stop": "⏸  Laisse-le pioncer",
+        "footer_idle": "Peinard... zzz",
+        "footer_running": "{t}  ·  {n} gigotements",
+        "timer_done": "Au lit !",
+        "timer_remaining": "Dodo dans {t}",
+        "mic_title": "Microphone",
+        "mic_label": "Micro",
+        "test_label": "Test",
+        "btn_test": "Tester",
+        "mic_detecting": "Je scrute...",
+        "mic_none": "Aucun micro (branché ?)",
+        "mic_named": "Micro : {name}",
+        "mic_recording_busy": "Déjà en train d'écouter",
+        "mic_testing": "Fais du bruit !",
+        "mic_ok": "Nickel, ça capte !",
+        "mic_no_sound": "J'entends que dalle",
+        "key_label": "Clé Mistral",
+        "lang_label": "Langue",
+        "shortcut_label": "Raccourci",
+        "trans_ready": "Tout ouïe — Ctrl+Alt+R",
+        "modules_missing": "Modules manquants (voir README)",
+        "history_title": "Historique",
+        "btn_copy": "Copier",
+        "btn_clear": "Effacer",
+        "voice_label": "Voix",
+        "say_what": "Je dis quoi ?",
+        "btn_read": "▶  Lis ça",
+        "btn_talking": "▶  Ça cause...",
+        "btn_stop_tts": "⏹  Stop",
+        "btn_clear_tts": "Effacer",
+        "btn_paste_tts": "Coller",
+        "tts_ready": "Quand tu veux",
+        "tts_unavailable": "Module TTS indisponible",
+        "opt_autostart": "  Lancer au démarrage",
+        "opt_tray": "  Planquer dans le tray",
+        "opt_beep": "  Petits bips",
+        "opt_topmost": "  Toujours devant",
+        "applang_label": "Langue de l'app",
+        "applang_restart": "Redémarre l'app pour changer de langue",
+        "about_title": "À propos",
+        "about_text": "Garde ton PC éveillé pendant que tu dodos.\n"
+                      "Dictée + voix de synthèse par Mistral Voxtral.\n"
+                      "Simple, malin, discret.",
+        "tray_show": "Afficher",
+        "tray_quit": "Quitter",
+    },
+    "en": {
+        "tab_sleep": "  Caffeine  ",
+        "tab_dictation": "  Dictation  ",
+        "tab_speak": "  Speak  ",
+        "tab_settings": "  Settings  ",
+        "tagline": "Your PC stays up. You go nap.",
+        "interval": "Interval",
+        "sec": "sec",
+        "distance": "Distance",
+        "px": "px",
+        "timer": "Timer",
+        "stop_at": "Stop at",
+        "btn_start": "▶  Wake it up",
+        "btn_stop": "⏸  Let it nap",
+        "footer_idle": "Just chilling... zzz",
+        "footer_running": "{t}  ·  {n} wiggles",
+        "timer_done": "Bedtime!",
+        "timer_remaining": "Sleep in {t}",
+        "mic_title": "Microphone",
+        "mic_label": "Mic",
+        "test_label": "Test",
+        "btn_test": "Test",
+        "mic_detecting": "Scanning...",
+        "mic_none": "No mic (plugged in?)",
+        "mic_named": "Mic: {name}",
+        "mic_recording_busy": "Already listening",
+        "mic_testing": "Make some noise!",
+        "mic_ok": "Sweet, it hears you!",
+        "mic_no_sound": "Crickets...",
+        "key_label": "Mistral key",
+        "lang_label": "Language",
+        "shortcut_label": "Shortcut",
+        "trans_ready": "All ears — Ctrl+Alt+R",
+        "modules_missing": "Missing modules (see README)",
+        "history_title": "History",
+        "btn_copy": "Copy",
+        "btn_clear": "Clear",
+        "voice_label": "Voice",
+        "say_what": "What should I say?",
+        "btn_read": "▶  Read it",
+        "btn_talking": "▶  Talking...",
+        "btn_stop_tts": "⏹  Stop",
+        "btn_clear_tts": "Clear",
+        "btn_paste_tts": "Paste",
+        "tts_ready": "Whenever you're ready",
+        "tts_unavailable": "TTS module unavailable",
+        "opt_autostart": "  Launch at startup",
+        "opt_tray": "  Hide in the tray",
+        "opt_beep": "  Little beeps",
+        "opt_topmost": "  Always on top",
+        "applang_label": "App language",
+        "applang_restart": "Restart the app to switch language",
+        "about_title": "About",
+        "about_text": "Keeps your PC awake while you snooze.\n"
+                      "Dictation + text-to-speech by Mistral Voxtral.\n"
+                      "Simple, smart, sneaky.",
+        "tray_show": "Show",
+        "tray_quit": "Quit",
+    },
+}
+
+
 # ── App ───────────────────────────────────────────────
 
 class LetMeSleep:
@@ -149,21 +386,34 @@ class LetMeSleep:
         self.moves = 0
         self.stop_time = None
         self.config = load_config()
+        self.ui_lang = self.config.get("ui_language", "fr")
+        if self.ui_lang not in STRINGS:
+            self.ui_lang = "fr"
         self.transcriber = None
         self.tray_icon = None
         self.history = self.config.get("history", [])
 
         self.tts_reader = None
         self._tts_voice_ids = []
+        self._wake = threading.Event()   # reveille le worker (toggle/quit)
+        self._dictee_ready = False       # micro initialise au 1er affichage
+        self._ticking = False            # garde anti-double-boucle horloge UI
+        self._save_after_id = None       # debounce de la sauvegarde config
+        self._quitting = False           # garde anti-double fermeture
 
         self._build_ui()
         self._start_worker()
-        self._tick_footer()
-        self._tick_timer()
         self._init_transcription()
         self._init_tts()
         self._init_tray()
+        self._wire_autosave()
         self.root.mainloop()
+
+    def t(self, key, **kw):
+        """Traduit une cle selon la langue de l'UI (repli FR puis cle brute)."""
+        s = STRINGS.get(self.ui_lang, STRINGS["fr"]).get(key) \
+            or STRINGS["fr"].get(key, key)
+        return s.format(**kw) if kw else s
 
     # ── Palette ────────────────────────────────────────
     BG      = "#1e1e2e"
@@ -210,15 +460,18 @@ class LetMeSleep:
         tab2 = tk.Frame(self.notebook, bg=self.BG)
         tab3 = tk.Frame(self.notebook, bg=self.BG)
         tab4 = tk.Frame(self.notebook, bg=self.BG)
-        self.notebook.add(tab1, text="  Veille  ")
-        self.notebook.add(tab2, text="  Dictee  ")
-        self.notebook.add(tab3, text="  Parler  ")
-        self.notebook.add(tab4, text="  Config  ")
+        self.notebook.add(tab1, text=self.t("tab_sleep"))
+        self.notebook.add(tab2, text=self.t("tab_dictation"))
+        self.notebook.add(tab3, text=self.t("tab_speak"))
+        self.notebook.add(tab4, text=self.t("tab_settings"))
 
         self._build_tab_antiveille(tab1)
         self._build_tab_transcription(tab2)
         self._build_tab_tts(tab3)
         self._build_tab_settings(tab4)
+
+        # Initialise le micro seulement quand l'onglet Dictee est ouvert.
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _apply_ttk_style(self):
         s = ttk.Style()
@@ -261,7 +514,7 @@ class LetMeSleep:
                                     bg=self.BG, fg=self.SUB)
         self.status_lbl.pack(side="right", padx=(0, 4))
 
-        tk.Label(self.root, text="Ton PC ne dormira plus jamais.",
+        tk.Label(self.root, text=self.t("tagline"),
                  font=("Segoe UI", 8), bg=self.BG, fg=self.SUB
                  ).pack(anchor="w", padx=16, pady=(0, 6))
 
@@ -272,24 +525,24 @@ class LetMeSleep:
         card = self._card(parent, top_pad=8)
 
         row1 = self._row(card)
-        self._lbl(row1, "Intervalle")
+        self._lbl(row1, self.t("interval"))
         self.interval_var = tk.StringVar(value="30")
         self._spinbox(row1, self.interval_var, 5, 300, 5)
-        self._lbl(row1, "sec", side="right", pad=(0, 4))
+        self._lbl(row1, self.t("sec"), side="right", pad=(0, 4))
 
         row2 = self._row(card, pad_top=2, pad_bot=10)
-        self._lbl(row2, "Distance")
+        self._lbl(row2, self.t("distance"))
         self.distance_var = tk.StringVar(value="5")
         self._spinbox(row2, self.distance_var, 1, 50, 1)
-        self._lbl(row2, "px", side="right", pad=(0, 4))
+        self._lbl(row2, self.t("px"), side="right", pad=(0, 4))
 
         # Timer
         timer = self._card(parent, top_pad=0)
-        tk.Label(timer, text="Minuterie", font=("Segoe UI", 9, "bold"),
+        tk.Label(timer, text=self.t("timer"), font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
 
         rt = self._row(timer, pad_bot=4)
-        self._lbl(rt, "Couper a")
+        self._lbl(rt, self.t("stop_at"))
         self.timer_hour = tk.StringVar(value="")
         self.timer_min = tk.StringVar(value="")
         tf = tk.Frame(rt, bg=self.CARD)
@@ -305,15 +558,15 @@ class LetMeSleep:
 
         # Bouton toggle
         self.btn = tk.Button(
-            parent, text="▶  Lancer", font=("Segoe UI", 11, "bold"),
+            parent, text=self.t("btn_start"), font=("Segoe UI", 11, "bold"),
             bg=self.ACCENT, fg="#1e1e2e", activebackground=self.ACCENT,
             activeforeground="#1e1e2e", relief="flat", cursor="hand2",
             command=self._toggle, height=1, bd=0,
         )
         self.btn.pack(fill="x", padx=8, pady=(6, 4))
 
-        self.footer = tk.Label(parent, text="En attente... zzz", font=("Segoe UI", 8),
-                                bg=self.BG, fg=self.SUB)
+        self.footer = tk.Label(parent, text=self.t("footer_idle"),
+                                font=("Segoe UI", 8), bg=self.BG, fg=self.SUB)
         self.footer.pack(pady=(2, 4))
 
     # ── Tab: Transcription ─────────────────────────────
@@ -321,11 +574,11 @@ class LetMeSleep:
     def _build_tab_transcription(self, parent):
         # ── Card Micro ──
         card_mic = self._card(parent, top_pad=8)
-        tk.Label(card_mic, text="Microphone", font=("Segoe UI", 9, "bold"),
+        tk.Label(card_mic, text=self.t("mic_title"), font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(6, 2))
 
         r_mic = self._row(card_mic, pad_top=2, pad_bot=2)
-        self._lbl(r_mic, "Micro")
+        self._lbl(r_mic, self.t("mic_label"))
         self.mic_var = tk.StringVar()
         self.mic_combo = ttk.Combobox(r_mic, textvariable=self.mic_var, width=20,
                                        state="readonly", font=("Segoe UI", 8))
@@ -334,13 +587,14 @@ class LetMeSleep:
         self._mic_devices = []
 
         r_test = self._row(card_mic, pad_top=2, pad_bot=2)
-        self._lbl(r_test, "Test")
+        self._lbl(r_test, self.t("test_label"))
         self.test_level = tk.Canvas(r_test, width=80, height=12,
                                      bg=self.SURFACE, highlightthickness=0)
         self.test_level.pack(side="right")
-        self._small_btn(r_test, "Tester", self._test_mic, side="right", padx=4)
+        self._small_btn(r_test, self.t("btn_test"), self._test_mic,
+                        side="right", padx=4)
 
-        self.mic_status = tk.Label(card_mic, text="Detection...",
+        self.mic_status = tk.Label(card_mic, text=self.t("mic_detecting"),
                                     font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB)
         self.mic_status.pack(pady=(0, 6))
 
@@ -348,27 +602,28 @@ class LetMeSleep:
         card_trans = self._card(parent, top_pad=0)
 
         r1 = self._row(card_trans)
-        self._lbl(r1, "Cle Mistral")
+        self._lbl(r1, self.t("key_label"))
         self.api_key_var = tk.StringVar(value=self.config.get("mistral_api_key", ""))
         tk.Entry(r1, textvariable=self.api_key_var, show="\u2022", width=22,
                  font=("Segoe UI", 8), bg=self.SURFACE, fg=self.TXT,
                  relief="flat", insertbackground=self.TXT).pack(side="right")
 
         r2 = self._row(card_trans, pad_top=2)
-        self._lbl(r2, "Langue")
+        self._lbl(r2, self.t("lang_label"))
         self.lang_var = tk.StringVar(value=self.config.get("language", "Auto"))
         ttk.Combobox(r2, textvariable=self.lang_var, width=14,
                      values=[l[0] for l in LANGUAGES], state="readonly",
                      font=("Segoe UI", 8)).pack(side="right")
 
         r3 = self._row(card_trans, pad_top=2, pad_bot=2)
-        self._lbl(r3, "Raccourci")
+        self._lbl(r3, self.t("shortcut_label"))
         tk.Label(r3, text="Ctrl+Alt+R", font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.PINK).pack(side="right")
 
         self.trans_status = tk.Label(
             card_trans,
-            text="Pret — Ctrl+Alt+R pour dicter" if HAS_TRANSCRIPTION else "Modules manquants (voir README)",
+            text=self.t("trans_ready") if HAS_TRANSCRIPTION
+            else self.t("modules_missing"),
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TRANSCRIPTION else self.RED,
         )
@@ -380,7 +635,7 @@ class LetMeSleep:
 
         # ── Card Historique ──
         hist = self._card(parent, top_pad=0)
-        tk.Label(hist, text="Historique", font=("Segoe UI", 9, "bold"),
+        tk.Label(hist, text=self.t("history_title"), font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(6, 2))
 
         self.history_list = tk.Listbox(
@@ -393,8 +648,10 @@ class LetMeSleep:
 
         btn_row = tk.Frame(hist, bg=self.CARD)
         btn_row.pack(fill="x", padx=8, pady=(0, 6))
-        self._small_btn(btn_row, "Copier", self._copy_history_item, side="left")
-        self._small_btn(btn_row, "Effacer", self._clear_history, side="left", padx=4)
+        self._small_btn(btn_row, self.t("btn_copy"), self._copy_history_item,
+                        side="left")
+        self._small_btn(btn_row, self.t("btn_clear"), self._clear_history,
+                        side="left", padx=4)
 
     # ── Tab: Lecture vocale (TTS) ─────────────────────
 
@@ -403,7 +660,7 @@ class LetMeSleep:
 
         # Voix
         r1 = self._row(card, pad_top=2, pad_bot=8)
-        self._lbl(r1, "Voix")
+        self._lbl(r1, self.t("voice_label"))
         self.tts_voice_var = tk.StringVar()
         self.tts_voice_combo = ttk.Combobox(
             r1, textvariable=self.tts_voice_var, width=22,
@@ -413,7 +670,7 @@ class LetMeSleep:
 
         # Zone de texte
         text_card = self._card(parent, top_pad=0)
-        tk.Label(text_card, text="Quoi dire ?", font=("Segoe UI", 9, "bold"),
+        tk.Label(text_card, text=self.t("say_what"), font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
 
         self.tts_text = tk.Text(
@@ -428,7 +685,7 @@ class LetMeSleep:
         btn_row.pack(fill="x", padx=8, pady=(0, 8))
 
         self.tts_play_btn = tk.Button(
-            btn_row, text="▶  Lire", font=("Segoe UI", 9, "bold"),
+            btn_row, text=self.t("btn_read"), font=("Segoe UI", 9, "bold"),
             bg=self.ACCENT, fg="#1e1e2e", activebackground=self.ACCENT,
             activeforeground="#1e1e2e", relief="flat", cursor="hand2",
             command=self._tts_play, bd=0, padx=12, pady=3,
@@ -436,18 +693,20 @@ class LetMeSleep:
         self.tts_play_btn.pack(side="left")
 
         tk.Button(
-            btn_row, text="⏹  Stop", font=("Segoe UI", 9, "bold"),
+            btn_row, text=self.t("btn_stop_tts"), font=("Segoe UI", 9, "bold"),
             bg=self.SURFACE, fg=self.TXT, activebackground=self.BORDER,
             activeforeground=self.TXT, relief="flat", cursor="hand2",
             command=self._tts_stop, bd=0, padx=12, pady=3,
         ).pack(side="left", padx=(4, 0))
 
-        self._small_btn(btn_row, "Effacer", self._tts_clear, side="right")
-        self._small_btn(btn_row, "Coller", self._tts_paste, side="right", padx=4)
+        self._small_btn(btn_row, self.t("btn_clear_tts"), self._tts_clear,
+                        side="right")
+        self._small_btn(btn_row, self.t("btn_paste_tts"), self._tts_paste,
+                        side="right", padx=4)
 
         self.tts_status = tk.Label(
             text_card,
-            text="Pret" if HAS_TTS else "Module TTS indisponible",
+            text=self.t("tts_ready") if HAS_TTS else self.t("tts_unavailable"),
             font=("Segoe UI", 8), bg=self.CARD,
             fg=self.SUB if HAS_TTS else self.RED,
         )
@@ -459,39 +718,49 @@ class LetMeSleep:
         card = self._card(parent, top_pad=8)
 
         self.autostart_var = tk.BooleanVar(value=self.config.get("autostart", False))
-        ttk.Checkbutton(card, text="  Lancer au demarrage",
+        ttk.Checkbutton(card, text=self.t("opt_autostart"),
                         variable=self.autostart_var, command=self._toggle_autostart
                         ).pack(anchor="w", padx=12, pady=(10, 2))
 
         self.tray_var = tk.BooleanVar(
             value=self.config.get("minimize_to_tray", False) and HAS_TRAY
         )
-        cb_tray = ttk.Checkbutton(card, text="  Planquer dans le tray",
+        cb_tray = ttk.Checkbutton(card, text=self.t("opt_tray"),
                                    variable=self.tray_var)
         cb_tray.pack(anchor="w", padx=12, pady=(2, 2))
         if not HAS_TRAY:
             cb_tray.configure(state="disabled")
 
         self.sound_var = tk.BooleanVar(value=self.config.get("sound_feedback", True))
-        ttk.Checkbutton(card, text="  Bip sonore",
+        ttk.Checkbutton(card, text=self.t("opt_beep"),
                         variable=self.sound_var
                         ).pack(anchor="w", padx=12, pady=(2, 2))
 
         self.topmost_var = tk.BooleanVar(value=self.config.get("always_on_top", True))
-        ttk.Checkbutton(card, text="  Toujours devant",
+        ttk.Checkbutton(card, text=self.t("opt_topmost"),
                         variable=self.topmost_var, command=self._toggle_topmost
-                        ).pack(anchor="w", padx=12, pady=(2, 10))
+                        ).pack(anchor="w", padx=12, pady=(2, 8))
+
+        # Langue de l'app (appliquee au redemarrage)
+        r_lang = self._row(card, pad_top=2, pad_bot=0)
+        self._lbl(r_lang, self.t("applang_label"))
+        self.ui_lang_var = tk.StringVar()
+        ui_lang_names = [name for name, _ in UI_LANGS]
+        cur = next((n for n, c in UI_LANGS if c == self.ui_lang), ui_lang_names[0])
+        self.ui_lang_var.set(cur)
+        ttk.Combobox(r_lang, textvariable=self.ui_lang_var, width=14,
+                     values=ui_lang_names, state="readonly",
+                     font=("Segoe UI", 8)).pack(side="right")
+        tk.Label(card, text=self.t("applang_restart"), font=("Segoe UI", 7),
+                 bg=self.CARD, fg=self.SUB).pack(anchor="w", padx=12, pady=(2, 10))
 
         # À propos
         about = self._card(parent, top_pad=0)
-        tk.Label(about, text="A propos", font=("Segoe UI", 9, "bold"),
+        tk.Label(about, text=self.t("about_title"), font=("Segoe UI", 9, "bold"),
                  bg=self.CARD, fg=self.TXT).pack(anchor="w", padx=12, pady=(8, 2))
-        tk.Label(about, text="LetMeSleep v3.1", font=("Segoe UI", 10, "bold"),
+        tk.Label(about, text=f"LetMeSleep v{APP_VERSION}", font=("Segoe UI", 10, "bold"),
                  bg=self.CARD, fg=self.PINK).pack(anchor="w", padx=12, pady=(0, 2))
-        tk.Label(about,
-                 text="Anti-veille pour PC pro qui veulent dormir.\n"
-                      "Dictee + lecture vocale par Mistral Voxtral.\n"
-                      "Simple. Efficace. Discret.",
+        tk.Label(about, text=self.t("about_text"),
                  font=("Segoe UI", 8), bg=self.CARD, fg=self.SUB, justify="left",
                  ).pack(anchor="w", padx=12, pady=(0, 10))
 
@@ -567,9 +836,13 @@ class LetMeSleep:
             self.started_at = datetime.now()
             self.moves = 0
             keep_awake(True)
-            self.btn.configure(text="⏸  Couper", bg=self.RED)
+            self.btn.configure(text=self.t("btn_stop"), bg=self.RED)
             self.status_dot.configure(fg=self.GREEN)
             self.status_lbl.configure(text="ON")
+            self._wake.set()        # debloque le worker
+            if not self._ticking:   # une seule boucle d'horloge a la fois
+                self._ticking = True
+                self._tick_status()
         else:
             self._deactivate()
 
@@ -577,10 +850,11 @@ class LetMeSleep:
         self.active = False
         self.stop_time = None
         keep_awake(False)
-        self.btn.configure(text="▶  Lancer", bg=self.ACCENT)
+        self._wake.set()            # interrompt l'attente d'intervalle du worker
+        self.btn.configure(text=self.t("btn_start"), bg=self.ACCENT)
         self.status_dot.configure(fg=self.RED)
         self.status_lbl.configure(text="OFF")
-        self.footer.configure(text="En attente... zzz")
+        self.footer.configure(text=self.t("footer_idle"))
         self.timer_lbl.configure(text="")
 
     def _start_worker(self):
@@ -591,35 +865,40 @@ class LetMeSleep:
                     move_mouse(dx * self.distance, dy * self.distance)
                     self.step += 1
                     self.moves += 1
-                    for _ in range(self.interval * 10):
-                        if not self.running or not self.active:
-                            break
-                        time.sleep(0.1)
+                    # Attente interruptible : 1 reveil par intervalle, et
+                    # reponse immediate au toggle off / quit.
+                    self._wake.wait(timeout=self.interval)
                 else:
-                    time.sleep(0.25)
+                    # Bloque sans consommer de CPU tant qu'inactif.
+                    self._wake.wait()
+                self._wake.clear()
         threading.Thread(target=loop, daemon=True).start()
 
-    def _tick_footer(self):
-        if self.active and self.started_at:
+    def _tick_status(self):
+        """Horloge UI 1s — ne tourne que pendant que le jiggler est actif."""
+        if not self.active:
+            self._ticking = False
+            return
+        if self.started_at:
             elapsed = int((datetime.now() - self.started_at).total_seconds())
             h, rem = divmod(elapsed, 3600)
             m, s = divmod(rem, 60)
-            self.footer.configure(text=f"{h:02d}:{m:02d}:{s:02d}  ·  {self.moves} mvt")
-        self.root.after(1000, self._tick_footer)
-
-    def _tick_timer(self):
-        if self.active and self.stop_time:
+            self.footer.configure(text=self.t(
+                "footer_running", t=f"{h:02d}:{m:02d}:{s:02d}", n=self.moves))
+        if self.stop_time:
             remaining = (self.stop_time - datetime.now()).total_seconds()
             if remaining <= 0:
                 self._deactivate()
-                self.timer_lbl.configure(text="Fini !", fg=self.PINK)
-            else:
-                h, rem = divmod(int(remaining), 3600)
-                m, s = divmod(rem, 60)
-                self.timer_lbl.configure(
-                    text=f"Arrêt dans {h:02d}:{m:02d}:{s:02d}", fg=self.PINK
-                )
-        self.root.after(1000, self._tick_timer)
+                self.timer_lbl.configure(text=self.t("timer_done"), fg=self.PINK)
+                self._ticking = False
+                return
+            h, rem = divmod(int(remaining), 3600)
+            m, s = divmod(rem, 60)
+            self.timer_lbl.configure(
+                text=self.t("timer_remaining", t=f"{h:02d}:{m:02d}:{s:02d}"),
+                fg=self.PINK,
+            )
+        self.root.after(1000, self._tick_status)
 
     # ── Transcription ──────────────────────────────────
 
@@ -632,8 +911,9 @@ class LetMeSleep:
 
         lang_code = LANG_MAP.get(self.lang_var.get(), "") or None
 
-        def on_status(msg, is_recording):
-            self.root.after(0, lambda: self._handle_trans_status(msg, is_recording))
+        def on_status(msg, is_recording, kind="info"):
+            self.root.after(
+                0, lambda: self._handle_trans_status(msg, is_recording, kind))
 
         def on_result(text):
             self.root.after(0, lambda: self._add_to_history(text))
@@ -641,21 +921,18 @@ class LetMeSleep:
         def on_level(peak):
             self.root.after(0, lambda: self._update_rec_level(peak))
 
-        # Resolve saved mic device
-        self._refresh_mic_list()
-        mic_dev = None
-        sel = self.mic_combo.current()
-        if 0 <= sel < len(self._mic_devices):
-            mic_dev = self._mic_devices[sel][0]
-
+        # device=None : micro systeme par defaut. L'enumeration des micros
+        # (qui charge sounddevice) est differee a l'ouverture de l'onglet
+        # Dictee, mais le hotkey global est actif des le lancement.
         self.transcriber = VoiceTranscriber(
             api_key=self.api_key_var.get(),
             language=lang_code,
             sound=self.sound_var.get(),
-            device=mic_dev,
+            device=None,
             on_status=on_status,
             on_result=on_result,
             on_level=on_level,
+            lang=self.ui_lang,
         )
         self.transcriber.start()
 
@@ -663,9 +940,6 @@ class LetMeSleep:
         self.api_key_var.trace_add("write", self._sync_transcriber)
         self.lang_var.trace_add("write", self._sync_transcriber)
         self.sound_var.trace_add("write", self._sync_transcriber)
-
-        # Start mic polling
-        self._tick_mic_check()
 
     def _sync_transcriber(self, *_):
         if not self.transcriber:
@@ -680,7 +954,8 @@ class LetMeSleep:
         """Enumere les peripheriques d'entree et peuple le dropdown."""
         try:
             devices = VoiceTranscriber.list_input_devices()
-        except Exception:
+        except Exception as e:
+            log.warning("Liste des micros indisponible: %s", e)
             devices = []
 
         self._mic_devices = devices
@@ -688,7 +963,7 @@ class LetMeSleep:
         self.mic_combo["values"] = names
 
         if not devices:
-            self.mic_status.configure(text="Aucun micro detecte", fg=self.RED)
+            self.mic_status.configure(text=self.t("mic_none"), fg=self.RED)
             self.mic_var.set("")
             return
 
@@ -702,7 +977,7 @@ class LetMeSleep:
         self.mic_var.set(names[selected_idx])
         self.mic_combo.current(selected_idx)
         self.mic_status.configure(
-            text=f"Micro: {names[selected_idx][:30]}", fg=self.GREEN
+            text=self.t("mic_named", name=names[selected_idx][:30]), fg=self.GREEN
         )
 
     def _on_mic_selected(self, event=None):
@@ -712,21 +987,22 @@ class LetMeSleep:
             if self.transcriber:
                 self.transcriber.update_device(dev_idx)
             self.mic_status.configure(
-                text=f"Micro: {name[:30]}", fg=self.GREEN
+                text=self.t("mic_named", name=name[:30]), fg=self.GREEN
             )
+            self._schedule_save()
 
     def _test_mic(self):
         if not HAS_TRANSCRIPTION or not self.transcriber:
             return
         if self.transcriber.recording:
-            self.mic_status.configure(text="Enregistrement en cours", fg=self.RED)
+            self.mic_status.configure(text=self.t("mic_recording_busy"), fg=self.RED)
             return
         if not self._mic_devices:
-            self.mic_status.configure(text="Aucun micro detecte", fg=self.RED)
+            self.mic_status.configure(text=self.t("mic_none"), fg=self.RED)
             return
         sel = self.mic_combo.current()
         dev = self._mic_devices[sel][0] if 0 <= sel < len(self._mic_devices) else None
-        self.mic_status.configure(text="Test en cours...", fg=self.PINK)
+        self.mic_status.configure(text=self.t("mic_testing"), fg=self.PINK)
         self.test_level.delete("all")
 
         def on_result(detected, peak):
@@ -737,16 +1013,43 @@ class LetMeSleep:
                 self.test_level.create_rectangle(0, 0, bar_w, 12,
                                                   fill=color, outline="")
                 if detected:
-                    self.mic_status.configure(text="Micro OK !", fg=self.GREEN)
+                    self.mic_status.configure(text=self.t("mic_ok"), fg=self.GREEN)
                 else:
-                    self.mic_status.configure(text="Aucun son detecte", fg=self.RED)
+                    self.mic_status.configure(text=self.t("mic_no_sound"), fg=self.RED)
             self.root.after(0, _update)
 
         self.transcriber.test_mic(device=dev, callback=on_result)
 
+    def _on_tab_changed(self, event=None):
+        try:
+            idx = self.notebook.index(self.notebook.select())
+        except tk.TclError:
+            return
+        if idx == 1:  # onglet Dictee
+            self._ensure_dictee_ready()
+
+    def _ensure_dictee_ready(self):
+        """Enumere les micros au 1er affichage de l'onglet (charge sounddevice)."""
+        if self._dictee_ready or not HAS_TRANSCRIPTION or not self.transcriber:
+            return
+        self._dictee_ready = True
+        self._refresh_mic_list()
+        sel = self.mic_combo.current()
+        if 0 <= sel < len(self._mic_devices):
+            self.transcriber.update_device(self._mic_devices[sel][0])
+        self._tick_mic_check()
+
     def _tick_mic_check(self):
-        """Verifie les changements de micro toutes les 5 secondes."""
-        if HAS_TRANSCRIPTION and not (self.transcriber and self.transcriber.recording):
+        """Verifie les changements de micro — seulement quand l'onglet Dictee
+        est visible, pour ne rien consommer en arriere-plan."""
+        if not self.running:
+            return
+        try:
+            on_dictee = self.notebook.index(self.notebook.select()) == 1
+        except tk.TclError:
+            on_dictee = False
+        if (on_dictee and HAS_TRANSCRIPTION
+                and not (self.transcriber and self.transcriber.recording)):
             def _check():
                 try:
                     current = VoiceTranscriber.list_input_devices()
@@ -754,10 +1057,10 @@ class LetMeSleep:
                     cached_names = {d[1] for d in self._mic_devices}
                     if current_names != cached_names:
                         self.root.after(0, self._on_mic_devices_changed)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Verification des micros echouee: %s", e)
             threading.Thread(target=_check, daemon=True).start()
-        self.root.after(5000, self._tick_mic_check)
+        self.root.after(10000, self._tick_mic_check)
 
     def _on_mic_devices_changed(self):
         """Appele quand la liste des micros a change."""
@@ -787,18 +1090,17 @@ class LetMeSleep:
 
     # ── Status & overlay ───────────────────────────────
 
-    def _handle_trans_status(self, msg, is_recording):
-        if is_recording:
-            color = self.RED
-        elif "OK" in msg or "Pret" in msg:
-            color = self.GREEN
-        elif "Erreur" in msg or "manquant" in msg or "introuvable" in msg:
-            color = self.RED
-        else:
-            color = self.PINK
-        self.trans_status.configure(text=msg, fg=color)
+    # Couleur du statut selon le type d'evenement (independant de la langue).
+    STATUS_COLORS = {"rec": "RED", "busy": "PINK", "ok": "GREEN",
+                     "error": "RED", "info": "PINK"}
 
-        self._show_overlay(msg)
+    def _status_color(self, kind):
+        return getattr(self, self.STATUS_COLORS.get(kind, "SUB"))
+
+    def _handle_trans_status(self, msg, is_recording, kind="info"):
+        self.trans_status.configure(text=msg, fg=self._status_color(kind))
+
+        self._show_overlay(msg, kind)
         if not is_recording:
             self.rec_level.delete("all")
             self._rec_level_bar = None
@@ -811,18 +1113,14 @@ class LetMeSleep:
         else:
             self._pulse_overlay()
 
-    def _show_overlay(self, text):
-        is_rec = "Enregistrement" in text
-        is_processing = "Transcription" in text
-        is_error = "Erreur" in text or "introuvable" in text
-
-        if is_rec:
+    def _show_overlay(self, text, kind="info"):
+        if kind == "rec":
             color = self.RED
             prefix = "●  "
-        elif is_processing:
+        elif kind == "busy":
             color = self.ACCENT
             prefix = ""
-        elif is_error:
+        elif kind == "error":
             color = self.RED
             prefix = ""
         else:
@@ -875,6 +1173,7 @@ class LetMeSleep:
         self.history.append(text)
         self.history = self.history[-10:]
         self._refresh_history()
+        self._schedule_save()
 
     def _copy_history_item(self):
         sel = self.history_list.curselection()
@@ -885,6 +1184,7 @@ class LetMeSleep:
     def _clear_history(self):
         self.history.clear()
         self._refresh_history()
+        self._schedule_save()
 
     # ── TTS actions ────────────────────────────────────
 
@@ -892,8 +1192,9 @@ class LetMeSleep:
         if not HAS_TTS:
             return
 
-        def on_status(msg, is_speaking):
-            self.root.after(0, lambda: self._handle_tts_status(msg, is_speaking))
+        def on_status(msg, is_speaking, kind="info"):
+            self.root.after(
+                0, lambda: self._handle_tts_status(msg, is_speaking, kind))
 
         api_key = self.config.get("mistral_api_key", "")
         saved_voice = self.config.get("tts_voice", "fr_female")
@@ -902,6 +1203,7 @@ class LetMeSleep:
             api_key=api_key,
             voice_id=saved_voice,
             on_status=on_status,
+            lang=self.ui_lang,
         )
 
         # Populate voice list
@@ -918,13 +1220,20 @@ class LetMeSleep:
         else:
             self._tts_voice_ids = []
 
-    def _handle_tts_status(self, msg, is_speaking):
-        color = self.PINK if is_speaking else self.SUB
+    def _handle_tts_status(self, msg, is_speaking, kind="info"):
+        if is_speaking:
+            color = self.PINK
+        elif kind == "error":
+            color = self.RED
+        elif kind == "ok":
+            color = self.GREEN
+        else:
+            color = self.SUB
         self.tts_status.configure(text=msg, fg=color)
         if is_speaking:
-            self.tts_play_btn.configure(text="▶  Ca parle...", bg=self.RED)
+            self.tts_play_btn.configure(text=self.t("btn_talking"), bg=self.RED)
         else:
-            self.tts_play_btn.configure(text="▶  Lire", bg=self.ACCENT)
+            self.tts_play_btn.configure(text=self.t("btn_read"), bg=self.ACCENT)
 
     def _tts_play(self):
         if not HAS_TTS:
@@ -966,16 +1275,21 @@ class LetMeSleep:
                 0, winreg.KEY_SET_VALUE,
             )
             if self.autostart_var.get():
-                exe = sys.executable
-                winreg.SetValueEx(key, "LetMeSleep", 0, winreg.REG_SZ, f'"{exe}"')
+                if getattr(sys, "frozen", False):
+                    cmd = f'"{sys.executable}"'
+                else:
+                    # Depuis les sources : sinon le registre lancerait python.exe
+                    # seul, sans notre script.
+                    cmd = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                winreg.SetValueEx(key, "LetMeSleep", 0, winreg.REG_SZ, cmd)
             else:
                 try:
                     winreg.DeleteValue(key, "LetMeSleep")
                 except FileNotFoundError:
                     pass
             winreg.CloseKey(key)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Demarrage auto (registre) echoue: %s", e)
 
     def _toggle_topmost(self):
         self.root.attributes("-topmost", self.topmost_var.get())
@@ -993,12 +1307,14 @@ class LetMeSleep:
             self.tray_icon = pystray.Icon(
                 "letmesleep", img, "LetMeSleep",
                 menu=pystray.Menu(
-                    pystray.MenuItem("Afficher", self._show_from_tray, default=True),
-                    pystray.MenuItem("Quitter", self._quit_from_tray),
+                    pystray.MenuItem(self.t("tray_show"), self._show_from_tray,
+                                     default=True),
+                    pystray.MenuItem(self.t("tray_quit"), self._quit_from_tray),
                 ),
             )
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
-        except Exception:
+        except Exception as e:
+            log.warning("Initialisation du tray echouee: %s", e)
             self.tray_icon = None
 
     def _show_from_tray(self, *_):
@@ -1015,13 +1331,34 @@ class LetMeSleep:
 
     # ── Save & Quit ────────────────────────────────────
 
+    def _wire_autosave(self):
+        """Persiste les preferences des qu'elles changent (debounce 800ms)."""
+        for var in (self.api_key_var, self.lang_var, self.sound_var,
+                    self.tray_var, self.autostart_var, self.topmost_var,
+                    self.ui_lang_var):
+            var.trace_add("write", lambda *_: self._schedule_save())
+        self.tts_voice_combo.bind(
+            "<<ComboboxSelected>>", lambda e: self._schedule_save(), add="+"
+        )
+
+    def _schedule_save(self):
+        if self._save_after_id is not None:
+            try:
+                self.root.after_cancel(self._save_after_id)
+            except Exception:
+                pass
+        self._save_after_id = self.root.after(800, self._save_config)
+
     def _save_config(self):
+        self._save_after_id = None
         self.config["mistral_api_key"] = self.api_key_var.get()
         self.config["language"] = self.lang_var.get()
         self.config["sound_feedback"] = self.sound_var.get()
         self.config["minimize_to_tray"] = self.tray_var.get()
         self.config["autostart"] = self.autostart_var.get()
         self.config["always_on_top"] = self.topmost_var.get()
+        self.config["ui_language"] = next(
+            (c for n, c in UI_LANGS if n == self.ui_lang_var.get()), self.ui_lang)
         self.config["history"] = self.history[-10:]
         sel = self.tts_voice_combo.current()
         if sel >= 0 and sel < len(self._tts_voice_ids):
@@ -1029,11 +1366,18 @@ class LetMeSleep:
         mic_sel = self.mic_combo.current()
         if 0 <= mic_sel < len(self._mic_devices):
             self.config["mic_device_name"] = self._mic_devices[mic_sel][1]
-        save_config(self.config)
+        try:
+            save_config(self.config)
+        except OSError as e:
+            log.warning("Sauvegarde de la config echouee: %s", e)
 
     def _quit(self):
+        if self._quitting:      # tray + WM_DELETE peuvent tous deux appeler
+            return
+        self._quitting = True
         self.running = False
         self.active = False
+        self._wake.set()        # debloque le worker pour qu'il termine
         keep_awake(False)
         self._save_config()
         if self.transcriber:
@@ -1043,8 +1387,8 @@ class LetMeSleep:
         if self.tray_icon:
             try:
                 self.tray_icon.stop()
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Arret du tray echoue: %s", e)
         self.root.destroy()
 
 

@@ -6,6 +6,8 @@ LetMeSleep is the ultimate remote worker's sidekick — a tiny Windows app that 
 
 Built for people who just want their Teams status to stay green while they go make a sandwich. No judgment here.
 
+> 🌍 **Now bilingual** — the whole UI speaks **English** and **French**. Switch it in the **Settings** tab (applied on restart).
+
 ---
 
 ## Features
@@ -19,15 +21,22 @@ Built for people who just want their Teams status to stay green while they go ma
 - Press **Ctrl+Alt+R** anywhere → speak → press again → text appears at your cursor
 - Powered by [Mistral's Voxtral API](https://docs.mistral.ai/capabilities/audio/speech_to_text/) — fast, accurate, multilingual
 - **13 languages** supported (French, English, Spanish, German, Chinese, Japanese, Korean, Arabic, Hindi, Portuguese, Italian, Russian, Dutch)
+- Microphone picker with live level meter and a one-click mic test
 - Floating overlay so you know when you're recording
 - Transcription history — copy any previous result with one click
+
+### 🔊 Text-to-Speech (Voxtral TTS)
+- Paste any text, pick a voice, hit **Read it** → hear it out loud
+- 20 preset voices across multiple languages and styles (neutral, cheerful, casual)
+- Powered by the same Mistral key — no extra setup
 
 ### ⚙️ Settings
 - **Start with Windows** — checkbox, done
 - **Minimize to system tray** — out of sight, out of mind
 - **Sound feedback** — beeps when recording starts/stops so you don't talk to yourself for nothing
 - **Always on top** toggle
-- All preferences saved automatically
+- **App language** — English or French, your call
+- All preferences saved automatically (and your API key is encrypted at rest via Windows DPAPI)
 
   <img width="1906" height="981" alt="image" src="https://github.com/user-attachments/assets/5c2ce5a1-928e-4f52-8b02-644271e2494d" />
 
@@ -64,7 +73,7 @@ build.bat
 ## Voice Transcription Setup
 
 1. Get a Mistral API key at [console.mistral.ai](https://console.mistral.ai/)
-2. Paste it in the **Transcription** tab
+2. Paste it in the **Dictation** tab (the same key also powers the **Speak** TTS tab)
 3. Pick your language (or leave on Auto)
 4. **Ctrl+Alt+R** to start recording, **Ctrl+Alt+R** again to stop & transcribe
 
@@ -74,15 +83,16 @@ The transcribed text gets pasted wherever your cursor is — Slack, Word, Notepa
 
 ## UI
 
-The app has 3 tabs:
+The app has 4 tabs (English names shown, French in parentheses):
 
 | Tab | What it does |
 |-----|-------------|
-| **Anti-Veille** | Mouse jiggler settings, timer, on/off toggle |
-| **Transcription** | API key, language picker, hotkey, history |
-| **Réglages** | Autostart, tray, sound, always-on-top, about |
+| **Caffeine** (Caféine) | Mouse jiggler settings, timer, on/off toggle |
+| **Dictation** (Dictée) | API key, mic picker, language, hotkey, history |
+| **Speak** (Parler) | Text-to-speech: paste text, pick a voice, play |
+| **Settings** (Config) | Autostart, tray, sound, always-on-top, app language, about |
 
-> *The UI uses the Catppuccin Mocha theme because we have taste.*
+> *The UI uses the Catppuccin Mocha theme because we have taste. It also speaks English and French — flip the switch in Settings.*
 
 ---
 
